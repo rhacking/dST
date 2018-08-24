@@ -28,19 +28,67 @@ BlurFunction = Callable[[np.ndarray], np.ndarray]
 
 
 class Volume(object):
-    def __init__(self, data: np.ndarray, resolution: Union[Tuple[float, float, float], np.ndarray]):
+    def __init__(self, data: np.ndarray, inverted: bool, spacing: Union[Tuple[float, float, float], np.ndarray],
+                 is_skewed: bool = True):
         self.data = data
-        self.resolution = np.array(resolution) if isinstance(resolution, tuple) else resolution
+        self.world_transform = np.eye(4)
+        self.is_skewed = is_skewed
+        self.inverted = inverted
+        self.spacing = np.array(spacing) if isinstance(spacing, tuple) else spacing
+
+    @property
+    def shape(self):
+        return self.data.shape
+
+    @property
+    def grid_to_world(self) -> np.ndarray:
+        result = np.array([
+            [self.spacing[0], 0, 0, 0],
+            [0, self.spacing[1] / (np.sqrt(2) if self.is_skewed else 1), 0, 0],
+            [0, 0, self.spacing[2] * (np.sqrt(2) if self.is_skewed else 1), 0],
+            [0, 0, 0, 1]
+        ])
+        if self.inverted:
+            result = result @ np.array([
+                [1, 0, 0, 0],
+                [0, 1, 0, self.shape[1]],
+                [0, 0, 1, self.shape[2]],
+                [0, 0, 0, 1]
+            ])
+            result = result @ np.array([
+                [1, 0, 0, 0],
+                [0, -1, 0, 0],
+                [0, 0, -1, 0],
+                [0, 0, 0, 1]
+            ])
+        if self.is_skewed:
+            shift = self.spacing[1] / math.sqrt(2) / (self.spacing[2] * math.sqrt(2))
+            total_shift = math.ceil(self.shape[1] * shift)
+
+            result = result @ np.array([
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, (-1 if self.inverted else 1) * self.spacing[1] / math.sqrt(2) / (self.spacing[2] * math.sqrt(2)), 1,
+                 0],
+                [0, 0, 0, 1]
+            ])
+            # result = result @ np.array([
+            #     [1, 0, 0, 0],
+            #     [0, 1, 0, 0],
+            #     [0, 0, 1, total_shift if self.inverted else 0],
+            #     [0, 0, 0, 1],
+            # ])
+        return result
 
     def get_center_of_mass(self):
-        return ndimage.center_of_mass(self.data) * self.resolution
+        return ndimage.center_of_mass(self.data) * self.spacing
 
     def rot90(self):
         reorder_indices = np.array([0, 2, 1])
         new_data = np.swapaxes(self.data, 1, 2)[:, :, ::-1]
-        return Volume(new_data, self.resolution[reorder_indices])
+        return Volume(new_data, self.spacing[reorder_indices])
 
-    def save_tiff_single(self, name: str, invert=False, swap_xy=False, dtype=np.float32, path='out'):
+    def save_tiff_single(self, name: str, invert=False, swap_xy=False, path='out'):
         from tifffile import imsave
         logger.debug('Saving single tif {} with shape {}'.format(name, self.data.shape))
         if not os.path.exists(path):
@@ -55,9 +103,8 @@ class Volume(object):
             data = np.swapaxes(data, 0, 2)
         if swap_xy:
             data = np.swapaxes(data, 0, 1)
-            # .swapaxes(0, 2).swapaxes(0, 1)
         data = np.swapaxes(data, 1, 0).swapaxes(2, 0)
-        # print((np.unique(data.T.astype(dtype))))
+
         imsave(path + '/' + name + '/' + name + '.tif', data)
 
     def save_tiff(self, name: str, invert=False, swap_xy=False, path='out'):
@@ -80,15 +127,29 @@ class Volume(object):
             imsave(path + '/' + name + '/' + name + str(slc_index) + '.tif',
                    (data[:, :, slc_index] / 2 ** 8).astype(np.uint8).T)
 
-    def save_nib(self, name: str):
-        import nibabel as nib
-        if not os.path.exists('out'):
-            os.makedirs('out')
-        if os.path.exists('out/' + name):
-            shutil.rmtree('out/' + name)
-        os.makedirs('out/' + name)
-        data = self.data
-        nib.save(nib.spatialimages.SpatialImage(np.clip(data, 0.0, 1.0), None), 'out/' + name + '/' + name + '.nii')
+    def update(self, data: np.ndarray = None, inverted: bool = None,
+               spacing: Union[Tuple[float, float, float], np.ndarray] = None,
+               is_skewed: bool = None, world_transform: np.ndarray = None):
+        if data is not None:
+            self.data = data
+        if world_transform is not None:
+            self.world_transform = world_transform
+        if is_skewed is not None:
+            self.is_skewed = is_skewed
+        if inverted is not None:
+            self.inverted = inverted
+        if spacing is not None:
+            self.spacing = np.array(spacing) if isinstance(spacing, tuple) else spacing
+
+        return self
+
+    def crop_view(self, crop: float):
+        w, h, l = self.shape
+        icrop = 1 - crop
+        view = self.data[int(w / 2 * icrop):int(-w / 2 * icrop),
+               int(h / 2 * icrop):int(-h / 2 * icrop),
+               int(l / 2 * icrop):int(-l / 2 * icrop)]
+        return Volume(view, self.inverted, self.spacing, is_skewed=self.is_skewed)
 
 
 def save_dual_tiff(name: str, vol_a: Volume, vol_b: Volume, path: str = 'out'):
@@ -98,10 +159,11 @@ def save_dual_tiff(name: str, vol_a: Volume, vol_b: Volume, path: str = 'out'):
     if os.path.exists(path + '/' + name):
         shutil.rmtree(path + '/' + name)
     os.makedirs(path + '/' + name)
+    print(vol_a.data.shape, vol_b.data.shape)
     data = np.array([vol_a.data, vol_b.data, np.zeros(vol_a.data.shape)])
 
     for slc_index in range(data.shape[3]):
-        imsave(path + '/' + name + '/' + name + str(slc_index) + '.tiff',
+        imsave(path + '/' + name + '/' + name + str(slc_index) + '.tif',
                (data[:, :, :, slc_index] / 2 ** 8).astype(np.uint8).T)
 
 
@@ -118,20 +180,51 @@ def save_dual_tiff_single(name: str, vol_a: Volume, vol_b: Volume, path: str = '
     imsave(path + '/' + name + '/' + name + '.tif', data)
 
 
-def unshift_fast(vol: Volume, invert: bool = False) -> Volume:
-    # FIXME: The resolution is incorrect!!!!! fix it!!!!
+def compute_true_interval(vol: Volume, invert: bool, n: int = 100) -> float:
+    from scipy.optimize import minimize_scalar
+    resolution = vol.spacing
+    rand_slice_indices = np.random.randint(0, vol.data.shape[2] - 1, n)
+
+    def compute_error(x):
+        shift = (resolution[2] + x) / resolution[1]
+        if invert:
+            shift = -shift
+
+        error = 0
+        for slice_index in rand_slice_indices:
+            shifted_b = scipy.ndimage.shift(vol.data[512:-512, 512:-512, slice_index + 1], (0, shift), order=1)
+            error += np.mean(
+                (vol.data[512:-512, 512:-512, slice_index].astype(np.float) - shifted_b.astype(np.float)) ** 2)
+        return error
+
+    result = minimize_scalar(compute_error)
+
+    return resolution[2] + result.x
+
+
+def unshift_fast(vol: Volume, invert: bool = False, estimate_true_interval: bool = True) -> Volume:
+    if estimate_true_interval:
+        interval = compute_true_interval(vol, invert)
+        vol.spacing[2] = interval
+        logger.debug('Estimated volume interval: {}'.format(interval))
+
     if invert:
-        data = unshift_fast_numbai(vol.data, vol.resolution)
+        data = unshift_fast_numbai(vol.data, vol.spacing)
         data = np.rot90(data, k=2, axes=(1, 2))
-        return Volume(data, (vol.resolution[0], vol.resolution[1] / np.sqrt(2),
-                             vol.resolution[2] * np.sqrt(2)))
+        return vol.update(data=data, inverted=False, spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+                                                              vol.spacing[2] * np.sqrt(2)), is_skewed=False)
+        # return Volume(data, False, (vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+        #                      vol.spacing[2] * np.sqrt(2)), is_skewed=False)
     else:
-        return Volume(unshift_fast_numba(vol.data, vol.resolution), (vol.resolution[0], vol.resolution[1] / np.sqrt(2),
-                                                                     vol.resolution[2] * np.sqrt(2)))
+        return vol.update(data=unshift_fast_numba(vol.data, vol.spacing),
+                          spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+                                   vol.spacing[2] * np.sqrt(2)), is_skewed=False)
+        # return Volume(unshift_fast_numba(vol.data, vol.spacing), False, (vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+        #                                                           vol.spacing[2] * np.sqrt(2)), is_skewed=False)
 
 
 @jit(nopython=True, parallel=True)
-def unshift_fast_numbai(data: np.ndarray, resolution: np.ndarray, invert: bool = False) -> np.ndarray:
+def unshift_fast_numbai(data: np.ndarray, resolution: np.ndarray) -> np.ndarray:
     w, h, d = data.shape
     shift = resolution[1] / math.sqrt(2) / (resolution[2] * math.sqrt(2))
     total_shift = math.ceil(h * shift)
@@ -154,7 +247,7 @@ def unshift_fast_numbai(data: np.ndarray, resolution: np.ndarray, invert: bool =
 
 
 @jit(nopython=True, parallel=True)
-def unshift_fast_numba(data: np.ndarray, resolution: np.ndarray, invert: bool = False) -> np.ndarray:
+def unshift_fast_numba(data: np.ndarray, resolution: np.ndarray) -> np.ndarray:
     w, h, d = data.shape
     shift = resolution[1] / math.sqrt(2) / (resolution[2] * math.sqrt(2))
     total_shift = math.ceil(h * shift)
@@ -178,10 +271,14 @@ def unshift_fast_numba(data: np.ndarray, resolution: np.ndarray, invert: bool = 
 
 def unshift_fast_diag(vol: Volume, invert: bool = False) -> Volume:
     # FIXME: The resolution is incorrect!!!!! fix it!!!!
+    interval = compute_true_interval(vol, invert)
+    vol.spacing[2] = interval
     if invert:
-        return Volume(unshift_fast_numbai_diag(vol.data, vol.resolution), vol.resolution)
+        data = unshift_fast_numbai_diag(vol.data, vol.spacing)
+        data = np.rot90(data, k=1, axes=(1, 2))
+        return Volume(data, vol.spacing)
     else:
-        return Volume(unshift_fast_numba_diag(vol.data, vol.resolution), vol.resolution)
+        return Volume(unshift_fast_numba_diag(vol.data, vol.spacing), vol.spacing)
 
 
 @jit(nopython=True, parallel=True)
@@ -239,7 +336,7 @@ def unshift(vol: Volume, invert: bool) -> Volume:
     :return: The deskewed volume
     """
     # Determine the shift step
-    shift = vol.resolution[2] / vol.resolution[1]
+    shift = vol.spacing[2] / vol.spacing[1]
     logger.debug('Unshifing with slice shift of {} and volume shape of {}'.format(shift, vol.data.shape))
 
     new_vol = [np.zeros(vol.data.shape[0:1])]
@@ -275,248 +372,132 @@ def unshift(vol: Volume, invert: bool) -> Volume:
     result = np.swapaxes(result, 0, 2)
     result = np.swapaxes(result, 0, 1)
     logger.debug("Shape after unshifting: {}".format(result.shape))
-    result_vol = Volume(result, vol.resolution)
+    result_vol = Volume(result, vol.spacing)
 
     return result_vol
 
 
-def get_com_image_shift(vol_a: Volume, vol_b: Volume):
-    comA = vol_a.get_center_of_mass()
-    comB = vol_b.get_center_of_mass()
-    return comB - comA
-
-
-def shift_to_mat(shift: np.ndarray):
-    return np.array([
-        [1, 0, 0, shift[0]],
-        [0, 1, 0, shift[1]],
-        [0, 0, 1, shift[2]],
-        [0, 0, 0, 1]
-    ])
-
-
-def compute_basic_cost(vol_a: Volume, vol_b: Volume, shift: np.ndarray) -> float:
-    mat = shift_to_mat(shift / vol_a.resolution[0])
-    points_a = np.zeros((4, np.product(vol_a.data.shape)))
-    # for i in range(1000):
-    #     point_a = np.random.rand(3) * vol_a.data.shape
-    #     points_a[:, i] = np.append(point_a, [1])
-
-    i = 0
-    n = 40
-    xpoints = np.linspace(0, vol_a.data.shape[0], n)
-    ypoints = np.linspace(0, vol_a.data.shape[1], n)
-    zpoints = np.linspace(0, vol_a.data.shape[2], n)
-
-    xv, yv, zv = np.meshgrid(xpoints, ypoints, zpoints)
-    xv = xv.ravel()
-    yv = yv.ravel()
-    zv = zv.ravel()
-    points_a = np.vstack((xv, yv, zv, np.ones(xv.shape[0])))
-
-    points_b = mat @ points_a
-    return float(np.sum(np.abs(scipy.ndimage.map_coordinates(vol_a.data, points_a[:3, :], order=0) -
-                               scipy.ndimage.map_coordinates(vol_b.data, points_b[:3, :], order=0))))
-
-
-def compute_shift_gradient(vol_a: Volume, vol_b: Volume, shift: np.ndarray,
-                           cost: Callable[[Volume, Volume, np.ndarray], float] = compute_basic_cost,
-                           h_size: float = 0.05):
-    gradient = np.zeros((3,))
-    f = partial(cost, vol_a, vol_b)
-    for i in range(3):
-        h = np.zeros((3,))
-        h[i] = h_size
-        gradient[i] = f(shift + h) - f(shift - h)
-        gradient[i] /= 2 * h_size
-
-    return gradient
-
-
 def register_manual_translation(vol_a: Volume, vol_b: Volume) -> np.ndarray:
+    plt.ion()
     fig, ax = plt.subplots(1, 2)
-    ax[0].imshow(np.mean(vol_a.data, axis=2, dtype=np.float32).T / 2 ** 16)
-    ax[1].imshow(np.mean(vol_b.data, axis=2, dtype=np.float32).T / 2 ** 16)
+    w, h, l = vol_a.data.shape
+    ax[0].imshow(
+        np.mean(vol_a.data[w // 4:-w // 4, h // 4:-h // 4, l // 4:-l // 4], axis=2, dtype=np.float32).T / 2 ** 16)
+    w, h, l = vol_b.data.shape
+    ax[1].imshow(
+        np.mean(vol_b.data[w // 4:-w // 4, h // 4:-h // 4, l // 4:-l // 4], axis=2, dtype=np.float32).T / 2 ** 16)
 
-    # plt.show()
-    points = plt.ginput(2)
+    points = plt.ginput(2, timeout=0)
     plt.close()
 
-    return np.array([points[1][0] - points[0][0], points[1][1] - points[0][1], 0])
+    fig, ax = plt.subplots(1, 2)
+    w, h, l = vol_a.data.shape
+    ax[0].imshow(
+        np.mean(vol_a.data[w // 4:-w // 4, h // 4:-h // 4, l // 4:-l // 4], axis=1, dtype=np.float32).T / 2 ** 16)
+    w, h, l = vol_b.data.shape
+    ax[1].imshow(
+        np.mean(vol_b.data[w // 4:-w // 4, h // 4:-h // 4, l // 4:-l // 4], axis=1, dtype=np.float32).T / 2 ** 16)
+
+    points2 = plt.ginput(2, timeout=0)
+    plt.close()
+
+    return np.array([points[1][0] - points[0][0], points[1][1] - points[0][1], points2[1][1] - points2[0][1]])
 
 
-def register(vol_a: Volume, vol_b: Volume, n: int = 5, alpha: float = 0.015):
-    shift = get_com_image_shift(vol_a, vol_b)
-    print(compute_basic_cost(vol_a, vol_b, shift))
-    for i in range(n):
-        gradient = compute_shift_gradient(vol_a, vol_b, shift)
-        shift -= alpha / (i + 1) * gradient
-        print('gradient: ' + str(gradient))
-        print(shift)
+def register_syn(vol_a: Volume, vol_b: Volume):
+    from dipy.align.imwarp import SymmetricDiffeomorphicRegistration
+    from dipy.align.imwarp import DiffeomorphicMap
+    from dipy.align.metrics import CCMetric
 
-    print(compute_basic_cost(vol_a, vol_b, shift))
+    metric = CCMetric(3)
+    level_iters = [8, 8, 4]
+    sdr = SymmetricDiffeomorphicRegistration(metric, level_iters)
 
-    return align_volumes(vol_a, vol_b, shift)
+    mapping = sdr.optimize(vol_a.data, vol_b.data, vol_a.grid_to_world, vol_b.grid_to_world, None)
 
+    transformed_b = mapping.transform(vol_b.data)
 
-class GeneticRegisterer(object):
-    def __init__(self, vol_a: Volume, vol_b: Volume, base: np.ndarray,
-                 cost: Callable[[Volume, Volume, np.ndarray], float], population_size: int):
-        self.population = base + np.random.randn(population_size, 3) * 0.03
-        self.population_size = population_size
-        self.evaluate = partial(cost, vol_a, vol_b)
-        self.best_scores = []
-
-    def get_best(self):
-        scores = np.zeros(self.population_size)
-        for i, v in enumerate(self.population):
-            scores[i] = self.evaluate(v) * 2
-
-        return self.population[np.argmin(scores)]
-
-    def next_gen(self):
-        scores = np.zeros(self.population_size)
-        for i, v in enumerate(self.population):
-            scores[i] = self.evaluate(v) * 2
-
-        new_pop = np.zeros((self.population_size, 3))
-        new_pop[:4] = self.population[np.argsort(scores)[:4]]
-        for i in range(4, self.population_size - 4):
-            parent = self.population[self.choose_random_weighted(1 / scores)]
-            new_pop[i] = self.mutate(parent)
-
-        self.population = new_pop
-
-        self.best_scores.append(np.min(scores))
-        print(self.best_scores[-1])
-
-    @staticmethod
-    def mutate(parent):
-        return parent + np.random.randn(3) * 0.3 if random.random() < 0.22 else np.copy(parent)
-
-    @staticmethod
-    def choose_random_weighted(weights):
-        total = np.sum(weights)
-        current = 0
-        pick = random.uniform(0, total)
-        for i, weight in enumerate(weights):
-            current += weight
-            if current >= pick:
-                return i
+    return vol_a, vol_b.update(data=transformed_b)
 
 
-def register_genetic(vol_a: Volume, vol_b: Volume):
-    shift = get_com_image_shift(vol_a, vol_b)
-    zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-    registerer = GeneticRegisterer(zoomed_a, zoomed_b, shift, compute_basic_cost, 90)
-    # i = 0
-    # while len(registerer.best_scores) == 0 or registerer.best_scores[-1] > 70:
-    for i in range(0):
-        print('gen: ' + str(i))
-        registerer.next_gen()
-        i += 1
+def register_2d(vol_a: Volume, vol_b: Volume):
+    from dipy.align.imaffine import (transform_centers_of_mass,
+                                     MutualInformationMetric,
+                                     AffineRegistration,
+                                     AffineMap,
+                                     )
+    from dipy.align.transforms import AffineTransform2D
+    vol_a_flat = np.mean(vol_a.data, axis=2)
+    vol_b_flat = np.mean(vol_b.data, axis=2)
 
-    shift = registerer.get_best()
+    nbins = 32
+    sampling_prop = 0.65
+    metric = MutualInformationMetric(nbins, sampling_prop)
 
-    plt.plot(registerer.best_scores)
-    plt.show()
+    level_iters = [50000, 3000, 80]
 
-    return align_volumes(zoomed_a, zoomed_b, shift)
+    sigmas = [5.0, 2.0, 0.0]
 
+    factors = [4, 2, 1]
 
-def register_ants(vol_a: Volume, vol_b: Volume):
-    import ants
-    zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-    img_a = ants.from_numpy(zoomed_a.data)
-    img_b = ants.from_numpy(zoomed_b.data)
-    # init = ants.affine_initializer(img_a, img_b)
-    transforms = ants.registration(img_a, img_b, type_of_transform='Translation', verbose=True)
-    result_img = ants.apply_transforms(img_a, img_b, transformlist=transforms['fwdtransforms'], verbose=True)
-    result_vol = Volume(result_img.numpy(), zoomed_b.resolution)
-    return zoomed_a, result_vol
+    affreg = AffineRegistration(metric=metric,
+                                level_iters=level_iters,
+                                sigmas=sigmas,
+                                factors=factors)
 
+    transform = AffineTransform2D()
+    params0 = None
 
-@profile
-def register_sitk(vol_a: Volume, vol_b: Volume):
-    zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-    import SimpleITK as sitk
-    import sys
-    print(sys.getsizeof(zoomed_a))
-    print(sys.getsizeof(zoomed_b))
-    # crop_offset = np.multiply(zoomed_a.data.shape, 1.0) // 2
-    # crop_offset = crop_offset.astype(np.int)
-    # center = np.floor_divide(zoomed_a.data.shape, 2)
+    I = np.eye(4)
 
-    img_a = sitk.GetImageFromArray(zoomed_a.data)
-    img_b = sitk.GetImageFromArray(zoomed_b.data)
-    print(sys.getsizeof(img_a))
-    print(img_b.GetDimension())
-    # img_a = sitk.GetImageFromArray(vol_a.data)
-    # img_a.SetSpacing(vol_a.resolution)
-    # img_b = sitk.GetImageFromArray(vol_b.data)
-    # img_b.SetSpacing(vol_b.resolution)
+    init = transform_centers_of_mass(vol_a_flat, I, vol_b_flat, I)
 
-    parameterMap = sitk.GetDefaultParameterMap('translation')
-    parameterMap['AutomaticTransformInitialization'] = ['true']
-    parameterMap['MaximumNumberOfSamplingAttempt'] = ['4']
+    starting_affine = init.affine
 
-    itk_filter = sitk.ElastixImageFilter()
-    itk_filter.LogToConsoleOn()
-    itk_filter.SetFixedImage(img_a)
-    itk_filter.SetMovingImage(img_b)
-    itk_filter.SetParameterMap(parameterMap)
-    print(itk_filter.GetParameter(1, 'FixedImageDimension'))
+    affine = affreg.optimize(vol_a_flat, vol_b_flat, transform, params0,
+                             I, I, starting_affine=starting_affine)
 
-    result_img2 = sitk.GetArrayFromImage(itk_filter.Execute())
+    b_trans = vol_b.world_transform
+    b_trans[0:2, 0:2] = affine.affine[0:2, 0:2]
+    b_trans[0:2, 3] = affine.affine[0:2, 2]
 
-    result_img = sitk.GetArrayFromImage(itk_filter.GetResultImage())
-    print(np.max(np.abs(result_img - zoomed_a.data)))
-    print(np.max(np.abs(result_img2 - zoomed_a.data)))
-    important_func()
-    # zoomed_a, zoomed_b = make_isotropic(vol_a, Volume(result_img, img_b.GetSpacing()))
-    return zoomed_a, Volume(result_img, zoomed_b.resolution)
+    return vol_a, vol_b.update(world_transform=b_trans)
 
 
 def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.ndarray] = None):
     from dipy.align.imaffine import (transform_centers_of_mass,
                                      MutualInformationMetric,
-                                     AffineRegistration)
+                                     AffineRegistration,
+                                     AffineMap,
+                                     )
     from dipy.align.transforms import (TranslationTransform3D,
-                                       RigidTransform3D)
+                                       RigidTransform3D,
+                                       AffineTransform3D)
 
-    # zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
+    subvol_a = vol_a.crop_view(0.6)
+    subvol_b = vol_b.crop_view(0.6)
 
-    grid2world_a = np.array([
-        [vol_a.resolution[0], 0, 0, 0],
-        [0, vol_a.resolution[1], 0, 0],
-        [0, 0, vol_a.resolution[2], 0],
-        [0, 0, 0, 1]
-    ])
+    logger.debug('Sub-volume A sgaoe: ' + str(subvol_a.shape))
+    logger.debug('Sub-volume B sgaoe: ' + str(subvol_b.shape))
 
-    grid2world_b = np.array([
-        [vol_b.resolution[0], 0, 0, 0],
-        [0, vol_b.resolution[1], 0, 0],
-        [0, 0, vol_b.resolution[2], 0],
-        [0, 0, 0, 1]
-    ])
-
-    I = np.eye(4)
-
-    c_of_mass = transform_centers_of_mass(vol_a.data, I, vol_b.data, I)
     if init_translation is not None:
-        com_affine = c_of_mass.get_affine()
-        com_affine[0:3, 3] = init_translation
-        c_of_mass.set_affine(com_affine)
-        print(c_of_mass)
-        # transformed_b = c_of_mass.transform(vol_b.data)
-
-        # return vol_a, Volume(transformed_b, vol_b.resolution)
+        init = AffineMap(np.array([
+            [1, 0, 0, init_translation[0]],
+            [0, 1, 0, init_translation[1]],
+            [0, 0, 1, init_translation[2]],
+            [0, 0, 0, 1]
+        ]), vol_a.shape, vol_a.grid_to_world, vol_b.shape, vol_b.grid_to_world)
+    else:
+        init = transform_centers_of_mass(subvol_a.data,
+                                         subvol_a.grid_to_world,
+                                         subvol_b.data,
+                                         subvol_b.grid_to_world)
 
     nbins = 32
-    sampling_prop = None
+    sampling_prop = 0.65
     metric = MutualInformationMetric(nbins, sampling_prop)
 
-    level_iters = [10000, 1000, 250]
+    level_iters = [50000, 3000, 80]
 
     sigmas = [5.0, 2.0, 0.0]
 
@@ -529,132 +510,61 @@ def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.nd
 
     transform = TranslationTransform3D()
     params0 = None
-    starting_affine = c_of_mass.affine
-    translation = affreg.optimize(vol_a.data, vol_b.data, transform, params0,
-                                  I, I,
+    starting_affine = init.affine
+    translation = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
+                                  subvol_a.grid_to_world, subvol_b.grid_to_world,
                                   starting_affine=starting_affine)
+
+    logger.debug('Registration translation: ' + str(translation))
 
     transform = RigidTransform3D()
     params0 = None
     starting_affine = translation.affine
-    rigid = affreg.optimize(vol_a.data, vol_b.data, transform, params0,
-                            I, I,
+    rigid = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
+                            subvol_a.grid_to_world, subvol_b.grid_to_world,
                             starting_affine=starting_affine)
 
-    # affreg = AffineRegistration(metric=metric,
-    #                             level_iters=[100, 75, 50],
-    #                             sigmas=sigmas,
-    #                             factors=factors)
+    logger.debug('Registration rigid: ' + str(rigid))
 
-    # transform = AffineTransform3D()
-    # params0 = None
-    # starting_affine = rigid.affine
-    # affine = affreg.optimize(zoomed_a.data, zoomed_b.data, transform, params0,
-    #                          I, I,
-    #                          starting_affine=starting_affine)
+    affreg = AffineRegistration(metric=metric,
+                                level_iters=[50000, 2000, 120],
+                                sigmas=sigmas,
+                                factors=factors)
 
-    transformed_b = rigid.transform(vol_b.data)
+    transform = AffineTransform3D()
+    params0 = None
+    starting_affine = rigid.affine
 
-    return vol_a, Volume(transformed_b, vol_b.resolution)
+    affine = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
+                             subvol_a.grid_to_world, subvol_b.grid_to_world,
+                             starting_affine=starting_affine)
 
+    logger.debug('Registration affine: ' + str(affine))
 
-def register_skimage(vol_a: Volume, vol_b: Volume):
-    zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-    from skimage.feature import register_translation
-    # from scipy.ndimage import shift
+    vol_b.world_transform = np.array(affine.affine)
 
-    max_shape = np.max([zoomed_a.data.shape, zoomed_b.data.shape], axis=0)
-    print(max_shape)
-    zoomed_a_padded = np.pad(zoomed_a.data, [(0, max_shape[i] - zoomed_a.data.shape[i]) for i in range(3)], 'constant',
-                             constant_values=0)
-    zoomed_b_padded = np.pad(zoomed_b.data, [(0, max_shape[i] - zoomed_b.data.shape[i]) for i in range(3)], 'constant',
-                             constant_values=0)
-
-    shift, _, _ = register_translation(zoomed_a_padded, zoomed_b_padded)
-    shifted = ndimage.shift(zoomed_b_padded, shift, order=1)
-    return Volume(zoomed_a_padded, zoomed_a.resolution), Volume(shifted, zoomed_b.resolution)
+    return vol_a, vol_b
 
 
-# def register_elastix(vol_a: Volume, vol_b: Volume):
-#     zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-#     zoomed_a_im = pyelastix.Image(zoomed_a.data)
-#     zoomed_b_im = pyelastix.Image(zoomed_b.data)
-#     zoomed_a_im.spacing = zoomed_a.resolution/1000
-#     zoomed_b_im.spacing = zoomed_b.resolution/1000
-#     zoomed_a_im.origin = zoomed_a.get_center_of_mass()/1000
-#     zoomed_b_im.origin = zoomed_b.get_center_of_mass()/1000
-#
-#     params = pyelastix.get_default_params(type='RIGID')
-#     params.StepLength = 0.005
-#     params.Scales = 2000000.0
-#     params.AutomaticScalesEstimation = False
-#     params.MaximumNumberOfIterations = 2
-#     params.AutomaticTransformInitialization = True
-#     vol_b_deformed, field = pyelastix.register(zoomed_b_im.astype('float32'), zoomed_a_im.astype('float32'), params, verbose=2)
-#     min = np.min(vol_b_deformed)
-#     max = np.max(vol_b_deformed)
-#
-#     return zoomed_a, Volume((vol_b_deformed-min)/(max-min), zoomed_b.resolution)
-#
-#
-# def register_itk(vol_a: Volume, vol_b: Volume):
-#     zoomed_a, zoomed_b = make_isotropic(vol_a, vol_b)
-#     selx = sitk.ElastixImageFilter()
-#     selx.SetFixedImage(sitk.GetImageFromArray(zoomed_a.data))
-#     selx.SetMovingImage(sitk.GetImageFromArray(zoomed_b.data))
-#
-#     selx.LogToConsoleOn()
-#     selx.Set
-#     selx.Execute()
-#
-#     return zoomed_a, Volume(sitk.GetArrayFromImage(selx.GetResultImage()), zoomed_b.resolution)
-
-@profile
 def make_isotropic(vol_a: Volume, vol_b: Volume):
     import scipy.interpolate
-    ax = np.arange(vol_a.data.shape[2])
-    bx = np.arange(vol_b.data.shape[1])
-    print(vol_a.data.dtype)
-    print(vol_b.data.dtype)
-    print('test1')
-    min_res = min(np.min(vol_a.resolution), np.min(vol_b.resolution))
-    print(min_res)
+    min_res = min(np.min(vol_a.spacing), np.min(vol_b.spacing))
     # zoomed_volA = scipy.interpolate.interp1d(ax, vol_a.data, axis=2)(np.linspace(0, len(ax)-1, len(ax)*(vol_a.resolution[2]/vol_b.resolution[2]))).astype(np.uint16)
-    zoomed_volA = scipy.ndimage.zoom(vol_a.data, vol_a.resolution / min_res, order=1)
-    print('test2')
+    zoomed_volA = scipy.ndimage.zoom(vol_a.data, vol_a.spacing / min_res, order=1)
     # zoomed_volB = scipy.interpolate.interp1d(bx, vol_b.data, axis=1)(np.linspace(0, len(bx)-1, len(bx)*(vol_b.resolution[1]/vol_a.resolution[1]))).astype(np.uint16)
-    zoomed_volB = scipy.ndimage.zoom(vol_b.data, vol_b.resolution / min_res, order=1)
+    zoomed_volB = scipy.ndimage.zoom(vol_b.data, vol_b.spacing / min_res, order=1)
 
-    print(vol_a.resolution / min_res)
-    print(vol_b.resolution / min_res)
-
-    result_vol_a = Volume(zoomed_volA,
-                          (vol_a.resolution[0], vol_a.resolution[1], vol_b.resolution[2]))
-    result_vol_b = Volume(zoomed_volB,
-                          (vol_b.resolution[0], vol_a.resolution[1], vol_b.resolution[2]))
+    result_vol_a = Volume(zoomed_volA, vol_a.inverted
+    (vol_a.spacing[0], vol_a.spacing[1], vol_b.spacing[2]), is_skewed=vol_a.is_skewed)
+    result_vol_b = Volume(zoomed_volB, vol_b.inverted
+    (vol_b.spacing[0], vol_a.spacing[1], vol_b.spacing[2]), is_skewed=vol_b.is_skewed)
 
     return result_vol_a, result_vol_b
-
-
-def align_volumes(vol_a: Volume, vol_b: Volume, shift: np.ndarray):
-    # TODO: Resulting volumes must have equal resolution
-    shifted_volB = np.clip(scipy.ndimage.interpolation.shift(vol_b.data, -shift / vol_b.resolution),
-                           0.0, 1.0)
-
-    new_shape = np.min([vol_a.data.shape, shifted_volB.shape], axis=0)
-    result_vol_a = Volume(vol_a.data[:new_shape[0], :new_shape[1], :new_shape[2]], vol_a.resolution)
-    result_vol_b = Volume(shifted_volB[:new_shape[0], :new_shape[1], :new_shape[2]], vol_b.resolution)
-    return result_vol_a, result_vol_b
-
-
-def remove_extremes(data, sigma):
-    mean = np.mean(data)
-    data[data - mean > sigma] = mean + sigma
-    data[data - mean < -sigma] = mean - sigma
 
 
 def fuse(vol_a: Volume, vol_b: Volume):
-    return Volume((vol_a.data + vol_b.data) / 2, vol_a.resolution)
+    # FIXME: Do something clever with is_skewed
+    return Volume(np.floor_divide(vol_a.data + vol_b.data, 2).astype(np.uint16), vol_a.spacing, is_skewed=False)
 
 
 def deconvolve_rl(vol: Volume, n: int, blur: BlurFunction) -> Volume:
@@ -671,7 +581,7 @@ def deconvolve_rl(vol: Volume, n: int, blur: BlurFunction) -> Volume:
     est_min = np.min(estimate)
     est_max = np.max(estimate)
 
-    return Volume(np.clip((estimate + est_min) / (est_max - est_min), 0.0, 1.0), vol.resolution)
+    return Volume(np.clip((estimate + est_min) / (est_max - est_min), 0.0, 1.0), vol.spacing)
 
 
 def deconvolve(vol_a: Volume, vol_b: Volume, n: int, blurA: BlurFunction, blurB: BlurFunction) -> Volume:
@@ -680,8 +590,6 @@ def deconvolve(vol_a: Volume, vol_b: Volume, n: int, blurA: BlurFunction, blurB:
     #     scipy.ndimage.zoom(view_a, (2, 2, 2)), 0.0, 1.0)
     # view_b = np.clip(
     #     scipy.ndimage.zoom(view_b, (2, 2, 2)), 0.0, 1.0)
-
-    print('hey')
 
     psf_A = np.zeros((17, 17, 17))
     psf_A[8, 8, 8] = 1
@@ -701,54 +609,7 @@ def deconvolve(vol_a: Volume, vol_b: Volume, n: int, blurA: BlurFunction, blurB:
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
 
-    return Volume(estimate, vol_a.resolution)
-
-
-def fuse_basic(vol_a: np.ndarray, vol_b: np.ndarray, pixel_size: float, interval: float, trans: np.ndarray):
-    # z_point_count = volB.shape[0]
-    z_point_count = int(math.floor((vol_a.shape[2] * interval) / math.sqrt(2) / pixel_size + 0.5))
-    z_points = np.linspace(0, vol_a.shape[2], z_point_count)
-
-    total_points = vol_a.shape[0] * vol_a.shape[1] * z_point_count
-
-    points_A = [np.zeros((total_points,)), np.zeros((total_points,)), np.zeros((total_points,))]
-    points_B = [np.zeros((total_points,)), np.zeros((total_points,)), np.zeros((total_points,))]
-
-    i = 0
-
-    for x in range(vol_a.shape[0]):
-        for y in range(vol_a.shape[1]):
-            for z_index in range(z_point_count):
-                z = z_points[z_index]
-
-                points_A[0][i] = x
-                points_A[1][i] = y
-                points_A[2][i] = z
-
-                loc = trans @ np.array([x, y, z, 1])
-                points_B[0][i] = loc[0]
-                points_B[1][i] = loc[1]
-                points_B[2][i] = loc[2]
-
-                i += 1
-
-    values_A = np.clip(ndimage.map_coordinates(vol_a, points_A, order=3), 0.0, 1.0)
-    values_B = np.clip(ndimage.map_coordinates(vol_b, points_B, order=3), 0.0, 1.0)
-
-    values_A = values_A.reshape((vol_a.shape[0], vol_a.shape[1], z_point_count))
-    values_B = values_B.reshape((vol_a.shape[0], vol_a.shape[1], z_point_count))
-
-    result = np.zeros((vol_a.shape[0], vol_a.shape[1], z_point_count), dtype='float64')
-
-    for x in range(vol_a.shape[0]):
-        for y in range(vol_a.shape[1]):
-            for z_index in range(z_point_count):
-                valA = values_A[x, y, z_index]
-                valB = values_B[x, y, z_index]
-                avg_val = (valA + valB) / 2
-                result[x, y, z_index] = avg_val
-
-    return result
+    return Volume(estimate, vol_a.spacing)
 
 
 # PSF Extraction
@@ -861,10 +722,11 @@ def compute_psf(vol: Volume):
             logger.warning(e)
             pass
 
-    return np.median(sigmas_z, axis=0) * vol.resolution[2], np.median(sigmas_xy, axis=0) * vol.resolution[0]
+    return np.median(sigmas_z, axis=0) * vol.spacing[2], np.median(sigmas_xy, axis=0) * vol.spacing[0]
 
 
 def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: float = None):
+    # FIXME: Only support loading a single volume or single volume pair
     from tifffile import imread
     import gc
 
@@ -876,7 +738,6 @@ def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: f
         logger.info("Initial volume shape: {}".format(data.shape))
 
         if len(data.shape) > 3:
-            # data = data[:, 0, :, :]  # TODO: What does the second dimension actually represent in this case?
             if scale is not None:
                 data_a = scipy.ndimage.zoom(data[:, 0, :, :], scale, order=1)
                 data_b = scipy.ndimage.zoom(data[:, 1, :, :], scale, order=1)
@@ -903,7 +764,7 @@ def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: f
     # TODO: Handle different data types (aside from uint16)
 
     for i in range(len(datas)):
-        volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), spacing))
+        volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), bool(i), spacing))
         gc.collect()
 
     return tuple(volumes)

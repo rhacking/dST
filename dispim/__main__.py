@@ -11,10 +11,10 @@ import re
 logger = logging.getLogger(__name__)
 
 ops = ['deskew', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
-       'discard_b', 'show_slice_y_z']
+       'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
+       'register2d']
 VAR_SPEC = r"((?:\d+(?:\.\d+))|(?:False)|(?:True)"
-OPERATION_SPEC = (r"^(" + "|".join(ops) + r")(?::" + VAR_SPEC + r")?(?:,VAR_SPEC)*$")
-
+OPERATION_SPEC = (r"^(" + "|".join(ops) + r")(?::" + VAR_SPEC + r")?(?:," + VAR_SPEC + ")*$")
 
 def process(args):
     print('starting')
@@ -37,7 +37,7 @@ def process(args):
     logger.info("Starting data processing...")
     processor = process.Processor(args.operations)
 
-    result = processor.process(tuple(volumes), args.save_inter)
+    result = processor.process(tuple(volumes), args.output, args.save_inter)
 
     if args.no_save:
         return
@@ -50,12 +50,12 @@ def process(args):
         if args.single_file_out:
             result[0].save_tiff_single('out_A_single', swap_xy=args.swap_xy_a, path=args.output)
         else:
-            result[0].save_tiff('out_A', swap_xy=args.swap_xy_a)
+            result[0].save_tiff('out_A', swap_xy=args.swap_xy_a, path=args.output)
         logger.info('Saving volume b...')
         if args.single_file_out:
             result[1].save_tiff_single('out_B_single', swap_xy=args.swap_xy_b, path=args.output)
         else:
-            result[1].save_tiff('out_B', swap_xy=args.swap_xy_b)
+            result[1].save_tiff('out_B', swap_xy=args.swap_xy_b, path=args.output)
     else:
         logger.info('Saving volume...')
         if args.single_file_out:

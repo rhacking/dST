@@ -35,17 +35,45 @@ class ProcessDeskew(ProcessStep):
 
     def process(self, data: ProcessData) -> ProcessData:
         if len(data) == 2:
-            return dispim.unshift_fast(data[0], self.invert_a), dispim.unshift_fast(data[1], self.invert_b)
+            return dispim.unshift_fast(data[0], self.invert_a, estimate_true_interval=False), dispim.unshift_fast(
+                data[1], self.invert_b, estimate_true_interval=False)
         else:
-            return dispim.unshift_fast(data[0], invert=self.invert_a),
+            return dispim.unshift_fast(data[0], invert=self.invert_a, estimate_true_interval=False),
             # return dispim.unshift(data[0], self.invert_a),
 
 
 class ProcessRegister(ProcessStep):
     def process(self, data: ProcessData) -> ProcessData:
-        # vol_b = data[1].rot90()
-        return dispim.register_dipy(data[0], data[1],
-                                    init_translation=dispim.register_manual_translation(data[0], data[1]))
+        return dispim.register_dipy(data[0], data[1])
+
+
+class ProcessRegister2d(ProcessStep):
+    def process(self, data: ProcessData):
+        return dispim.register_2d(*data)
+
+
+class ProcessApplyRegistration(ProcessStep):
+    def process(self, data: ProcessData) -> ProcessData:
+        from scipy.ndimage import affine_transform
+        print(data[0].data.shape, data[1].data.shape)
+        transform = np.linalg.inv(data[1].grid_to_world)
+        # data[1].world_transform[1, 3] /= -np.sqrt(2)
+        transform = transform @ data[1].world_transform
+        transform = transform @ data[0].grid_to_world
+        # transform[2, 3] = 0
+        print(np.linalg.inv(data[0].grid_to_world))
+        print(data[0].inverted)
+        print(data[1].inverted)
+        print(data[1].world_transform)
+        print(data[1].grid_to_world)
+        print(transform)
+        print(data[1].shape)
+        return data[0], Volume(affine_transform(data[1].data, (transform)), False, data[0].spacing, is_skewed=False)
+
+
+class ProcessRegisterSyn(ProcessStep):
+    def process(self, data: ProcessData):
+        return dispim.register_syn(data[0], data[1])
 
 
 class ProcessFuse(ProcessStep):
@@ -53,12 +81,12 @@ class ProcessFuse(ProcessStep):
         super().__init__()
 
     def process(self, data: ProcessData) -> ProcessData:
-        if np.all(data[0].resolution != data[1].resolution):
+        if np.all(data[0].spacing != data[1].spacing):
             logger.error('Both volumes must have equal resolution to deconvolve. ')
         if np.all(data[0].data.shape != data[1].data.shape):
             logger.error('Both volumes must have equal dimensions to deconvolve. ')
 
-        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].resolution, data[1].resolution))
+        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
 
         return dispim.fuse(data[0], data[1]),
 
@@ -86,12 +114,12 @@ class ProcessDeconvolve(ProcessStep):
         self.iters = iters
 
     def process(self, data: ProcessData) -> ProcessData:
-        if np.all(data[0].resolution != data[1].resolution):
+        if np.all(data[0].spacing != data[1].spacing):
             logger.error('Both volumes must have equal resolution to deconvolve. ')
         if np.all(data[0].data.shape != data[1].data.shape):
             logger.error('Both volumes must have equal dimensions to deconvolve. ')
 
-        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].resolution, data[1].resolution))
+        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
 
         sigma_a = self.sigma
         sigma_b = self.sigma
@@ -102,7 +130,7 @@ class ProcessDeconvolve(ProcessStep):
             # sigma_b, _ = dispim.compute_psf(data[1])
 
         logger.info('Deconvolving...')
-        blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].resolution[2], axis=2)
+        blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
         # blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b/data[1].resolution[1], axis=1)
 
         return dispim.deconvolve(data[0], data[1], self.iters, blur_a, blur_a),
@@ -124,8 +152,8 @@ class ProcessDeconvolveSeparate(ProcessStep):
                 sigma_a, _ = dispim.compute_psf(data[0])
                 sigma_b, _ = dispim.compute_psf(data[1])
 
-            blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].resolution[2], axis=2)
-            blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b / data[1].resolution[2], axis=2)
+            blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
+            blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b / data[1].spacing[2], axis=2)
 
             logger.info('Deconvolving using rl...')
             return dispim.deconvolve_rl(data[0], self.iters, blur_a), dispim.deconvolve_rl(data[1], self.iters, blur_b)
@@ -135,7 +163,7 @@ class ProcessDeconvolveSeparate(ProcessStep):
                 logger.info("Extracting gaussian psf...")
                 sigma, _ = dispim.compute_psf(data[0])
             # blur = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma/data[0].resolution[2], axis=2)
-            blur = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma / data[0].resolution[2], axis=2)
+            blur = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma / data[0].spacing[2], axis=2)
             logger.info('Deconvolving using rl...')
             return dispim.deconvolve_rl(data[0], self.iters, blur),
 
@@ -154,7 +182,7 @@ class ProcessCenterCrop(ProcessStep):
             center = np.floor_divide(vol.data.shape, 2)
             result.append(Volume(vol.data[center[0] - crop_offset[0]:center[0] + crop_offset[0],
                                  center[1] - crop_offset[1]:center[1] + crop_offset[1],
-                                 center[2] - crop_offset[2]:center[2] + crop_offset[2]], vol.resolution))
+                                 center[2] - crop_offset[2]:center[2] + crop_offset[2]], vol.inverted, vol.spacing))
 
         return tuple(result)
 
@@ -171,6 +199,43 @@ class ProcessScale(ProcessStep):
             result.append(scipy.ndimage.zoom(vol.data, self.scale_value))
 
         return tuple(result)
+
+
+class ProcessRot90(ProcessStep):
+    def __init__(self, rot_a=False, rot_b=True):
+        super().__init__()
+        self.rot_a = rot_a
+        self.rot_b = rot_b
+
+    def process(self, data: ProcessData) -> ProcessData:
+        return (Volume(np.rot90(data[0].data, k=1, axes=(1, 2)),
+                       (data[0].spacing[0], data[0].spacing[2], data[0].spacing[1])) if self.rot_a else data[
+            0],
+                Volume(np.rot90(data[1].data, k=1, axes=(1, 2)),
+                       (data[1].spacing[0], data[1].spacing[2], data[1].spacing[1])) if self.rot_b else data[
+                    1])
+
+
+class ProcessMakeIsotropic(ProcessStep):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, data: ProcessData) -> ProcessData:
+        return dispim.make_isotropic(data[0], data[1])
+
+
+class ProcessShowDual(ProcessStep):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, data: ProcessData) -> ProcessData:
+        import matplotlib.pyplot as plt
+        img = np.stack([np.sum(data[0].data, axis=2, dtype=np.float) / 2 ** 16,
+                        np.sum(data[1].data, axis=2, dtype=np.float) / 2 ** 16,
+                        np.zeros((data[0].data.shape[0], data[0].data.shape[1]))], axis=2)
+        plt.imshow(img)
+        plt.show()
+        return data
 
 
 class ProcessShowSliceYZ(ProcessStep):
@@ -192,7 +257,7 @@ class Processor(object):
     def __init__(self, steps: List[ProcessStep]):
         self.steps = steps
 
-    def process(self, data: ProcessData, save_intermediate=False) -> ProcessData:
+    def process(self, data: ProcessData, path: str, save_intermediate=False) -> ProcessData:
         import gc, sys
         for i, step in enumerate(self.steps):
             # TODO: Check this BEFORE processing...
@@ -215,8 +280,8 @@ class Processor(object):
             gc.collect()
 
             if save_intermediate:
-                data[0].save_tiff(step.__class__.__name__ + "_A")
+                data[0].save_tiff(step.__class__.__name__ + "_A", path=path)
                 if len(data) > 1:
-                    data[1].save_tiff(step.__class__.__name__ + "_B")
+                    data[1].save_tiff(step.__class__.__name__ + "_B", path=path)
 
         return data

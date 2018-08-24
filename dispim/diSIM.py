@@ -274,7 +274,7 @@ def test():
 
     print("Scanning from A")
     scan_vol_A = scan(vol, False, gaussian=False, gaussian_FWHM=0.2)
-    scan_vol_A = dispim.Volume((scan_vol_A.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_A.resolution)
+    scan_vol_A = dispim.Volume((scan_vol_A.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_A.spacing)
     scan_vol_A.save_tiff('test_A')
     print("Deskewing A")
     deskewed_A = dispim.unshift_fast(scan_vol_A, False)
@@ -285,7 +285,7 @@ def test():
     #
     print("Scanning from B")
     scan_vol_B = scan(vol, True, gaussian=False, gaussian_FWHM=0.2)
-    scan_vol_B = dispim.Volume((scan_vol_B.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_B.resolution)
+    scan_vol_B = dispim.Volume((scan_vol_B.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_B.spacing)
     scan_vol_B.save_tiff('test_B')
     print("Deskewing B")
     deskewed_B = dispim.unshift_fast(scan_vol_B, True)
