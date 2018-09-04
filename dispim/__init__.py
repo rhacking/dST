@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import progressbar
 import scipy
-from memory_profiler import profile
+# from memory_profiler import profile
 from numba import jit, prange
 from scipy import ndimage
 from scipy.ndimage.filters import gaussian_laplace, minimum_filter
@@ -144,6 +144,8 @@ class Volume(object):
         return self
 
     def crop_view(self, crop: float):
+        if crop > 0.99999:
+            return self
         w, h, l = self.shape
         icrop = 1 - crop
         view = self.data[int(w / 2 * icrop):int(-w / 2 * icrop),
@@ -464,7 +466,7 @@ def register_2d(vol_a: Volume, vol_b: Volume):
     return vol_a, vol_b.update(world_transform=b_trans)
 
 
-def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.ndarray] = None):
+def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.ndarray] = None, crop: float = 0.6):
     from dipy.align.imaffine import (transform_centers_of_mass,
                                      MutualInformationMetric,
                                      AffineRegistration,
@@ -474,8 +476,10 @@ def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.nd
                                        RigidTransform3D,
                                        AffineTransform3D)
 
-    subvol_a = vol_a.crop_view(0.6)
-    subvol_b = vol_b.crop_view(0.6)
+    subvol_a = vol_a.crop_view(crop)
+    subvol_b = vol_b.crop_view(crop)
+
+    print(subvol_b.grid_to_world)
 
     logger.debug('Sub-volume A sgaoe: ' + str(subvol_a.shape))
     logger.debug('Sub-volume B sgaoe: ' + str(subvol_b.shape))
@@ -554,17 +558,17 @@ def make_isotropic(vol_a: Volume, vol_b: Volume):
     # zoomed_volB = scipy.interpolate.interp1d(bx, vol_b.data, axis=1)(np.linspace(0, len(bx)-1, len(bx)*(vol_b.resolution[1]/vol_a.resolution[1]))).astype(np.uint16)
     zoomed_volB = scipy.ndimage.zoom(vol_b.data, vol_b.spacing / min_res, order=1)
 
-    result_vol_a = Volume(zoomed_volA, vol_a.inverted
-    (vol_a.spacing[0], vol_a.spacing[1], vol_b.spacing[2]), is_skewed=vol_a.is_skewed)
-    result_vol_b = Volume(zoomed_volB, vol_b.inverted
-    (vol_b.spacing[0], vol_a.spacing[1], vol_b.spacing[2]), is_skewed=vol_b.is_skewed)
+    result_vol_a = vol_a.update(zoomed_volA,
+                                spacing=(vol_a.spacing[0], vol_a.spacing[1], vol_b.spacing[2]))
+    result_vol_b = vol_b.update(zoomed_volB,
+                                spacing=(vol_b.spacing[0], vol_a.spacing[1], vol_b.spacing[2]))
 
     return result_vol_a, result_vol_b
 
 
 def fuse(vol_a: Volume, vol_b: Volume):
     # FIXME: Do something clever with is_skewed
-    return Volume(np.floor_divide(vol_a.data + vol_b.data, 2).astype(np.uint16), vol_a.spacing, is_skewed=False)
+    return Volume(np.floor_divide(vol_a.data + vol_b.data, 2).astype(np.uint16), False, vol_a.spacing, is_skewed=False)
 
 
 def deconvolve_rl(vol: Volume, n: int, blur: BlurFunction) -> Volume:
@@ -725,7 +729,7 @@ def compute_psf(vol: Volume):
     return np.median(sigmas_z, axis=0) * vol.spacing[2], np.median(sigmas_xy, axis=0) * vol.spacing[0]
 
 
-def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: float = None):
+def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: float = None, is_skewed: bool = True):
     # FIXME: Only support loading a single volume or single volume pair
     from tifffile import imread
     import gc
@@ -760,11 +764,12 @@ def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: f
 
     print(datas[0].nbytes)
     print(datas[0].dtype)
+    print(datas[0].max())
 
     # TODO: Handle different data types (aside from uint16)
 
     for i in range(len(datas)):
-        volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), bool(i), spacing))
+        volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), bool(i), spacing, is_skewed=is_skewed))
         gc.collect()
 
     return tuple(volumes)

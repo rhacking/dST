@@ -43,8 +43,12 @@ class ProcessDeskew(ProcessStep):
 
 
 class ProcessRegister(ProcessStep):
+    def __init__(self, crop: float = 0.6):
+        super().__init__()
+        self.crop = crop
+
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.register_dipy(data[0], data[1])
+        return dispim.register_dipy(data[0], data[1], crop=self.crop)
 
 
 class ProcessRegister2d(ProcessStep):
@@ -68,7 +72,14 @@ class ProcessApplyRegistration(ProcessStep):
         print(data[1].grid_to_world)
         print(transform)
         print(data[1].shape)
-        return data[0], Volume(affine_transform(data[1].data, (transform)), False, data[0].spacing, is_skewed=False)
+        transformed = affine_transform(data[1].data, (transform))
+        transformed = transformed[:data[0].shape[0], :data[0].shape[1], :data[0].shape[2]]
+        transformed = np.pad(transformed, ((0, np.max(data[0].shape[0] - transformed.shape[0], 0)),
+                                           (0, np.max(data[0].shape[1] - transformed.shape[1], 0)),
+                                           (0, np.max(data[0].shape[2] - transformed.shape[2], 0))),
+                             mode='constant', constant_values=0)
+
+        return data[0], data[1].update(transformed, inverted=False, spacing=data[0].spacing, is_skewed=False)
 
 
 class ProcessRegisterSyn(ProcessStep):
@@ -89,6 +100,19 @@ class ProcessFuse(ProcessStep):
         logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
 
         return dispim.fuse(data[0], data[1]),
+
+
+class ProcessBrighten(ProcessStep):
+    def __init__(self, f):
+        super().__init__()
+        self.f = f
+        self.accepts_single = True
+
+    def process(self, data: ProcessData):
+        if len(data) == 2:
+            return data[0].update((data[0].data*self.f).astype(np.uint16)), data[1].update((data[1].data*self.f).astype(np.uint16))
+        else:
+            return data[0].update((data[0].data*self.f).astype(np.uint16))
 
 
 class ProcessDiscardA(ProcessStep):
@@ -187,6 +211,90 @@ class ProcessCenterCrop(ProcessStep):
         return tuple(result)
 
 
+class ProcessShowAIso(ProcessStep):
+    def __init__(self):
+        super().__init__()
+        self.accepts_single = True
+
+    def process(self, data: ProcessData):
+        from scipy.ndimage import rotate
+
+        rotated = rotate(data[0].data, -45, axes=(0, 1))
+        rotated = rotate(rotated, -45, axes=(0, 2))
+
+        import matplotlib.pyplot as plt
+        plt.imshow(np.sum(rotated, axis=2))
+        plt.show()
+
+        return data
+
+
+class ProcessShowBIso(ProcessStep):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, data: ProcessData):
+        from scipy.ndimage import rotate
+
+        rotated = rotate(data[1].data, -45, axes=(0, 1))
+        rotated = rotate(rotated, -45, axes=(0, 2))
+
+        import matplotlib.pyplot as plt
+        plt.imshow(np.sum(rotated, axis=2))
+        plt.show()
+
+        return data
+
+
+class ProcessShowOverlayIso(ProcessStep):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, data: ProcessData):
+        from scipy.ndimage import rotate
+
+        rotated_a = rotate(data[0].data.astype(np.float), -45, axes=(0, 1), cval=-1000)
+        rotated_a = rotate(rotated_a, -45, axes=(0, 2), cval=-1000)
+
+        rotated_b = rotate(data[1].data.astype(np.float), -45, axes=(0, 1), cval=-1000)
+        rotated_b = rotate(rotated_b, -45, axes=(0, 2), cval=-1000)
+
+        max_val = max(rotated_a.max(), rotated_b.max())*0.05+1000
+
+        import matplotlib.pyplot as plt
+        img = np.stack([(np.mean(rotated_a, axis=2, dtype=np.float)+1000) / max_val,
+                        (np.mean(rotated_b, axis=2, dtype=np.float)+1000) / max_val,
+                        np.zeros((rotated_a.shape[0], rotated_b.shape[1]))], axis=2)
+        plt.imshow(img)
+        plt.show()
+
+        return data
+
+
+class ProcessShowSeperateIso(ProcessStep):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, data: ProcessData):
+        from scipy.ndimage import rotate
+
+        rotated_a = rotate(data[0].data.astype(np.float), -45, axes=(0, 1), cval=-1000)
+        rotated_a = rotate(rotated_a, -45, axes=(0, 2), cval=-1000)
+
+        rotated_b = rotate(data[1].data.astype(np.float), -45, axes=(0, 1), cval=-1000)
+        rotated_b = rotate(rotated_b, -45, axes=(0, 2), cval=-1000)
+
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, 2)
+        ax[0].imshow(np.sum(rotated_a, axis=2))
+        ax[0].set_title('Volume A')
+        ax[1].imshow(np.sum(rotated_b, axis=2))
+        ax[1].set_title('Volume B')
+        plt.show()
+
+        return data
+
+
 class ProcessScale(ProcessStep):
     def __init__(self, scale_value):
         super().__init__()
@@ -202,18 +310,12 @@ class ProcessScale(ProcessStep):
 
 
 class ProcessRot90(ProcessStep):
-    def __init__(self, rot_a=False, rot_b=True):
+    def __init__(self, reverse: bool = True):
         super().__init__()
-        self.rot_a = rot_a
-        self.rot_b = rot_b
+        self.reverse = reverse
 
     def process(self, data: ProcessData) -> ProcessData:
-        return (Volume(np.rot90(data[0].data, k=1, axes=(1, 2)),
-                       (data[0].spacing[0], data[0].spacing[2], data[0].spacing[1])) if self.rot_a else data[
-            0],
-                Volume(np.rot90(data[1].data, k=1, axes=(1, 2)),
-                       (data[1].spacing[0], data[1].spacing[2], data[1].spacing[1])) if self.rot_b else data[
-                    1])
+        return data[0], data[1].update(np.rot90(data[1].data, k=(3 if self.reverse else 1), axes=(1, 2)), spacing=(data[1].spacing[0], data[1].spacing[2], data[1].spacing[1]))
 
 
 class ProcessMakeIsotropic(ProcessStep):

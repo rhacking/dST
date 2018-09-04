@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 ops = ['deskew', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
        'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
-       'register2d']
+       'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso']
 VAR_SPEC = r"((?:\d+(?:\.\d+))|(?:False)|(?:True)"
 OPERATION_SPEC = (r"^(" + "|".join(ops) + r")(?::" + VAR_SPEC + r")?(?:," + VAR_SPEC + ")*$")
 
@@ -23,7 +23,7 @@ def process(args):
     if args.pixel_size > args.interval:
         logger.warning('The pixel size is greater than the interval. Arguments may have been swapped. ')
     volumes = dispim.load_volumes([args.spim_a, args.spim_b] if args.spim_b is not None else [args.spim_a],
-                                  (args.pixel_size, args.pixel_size, args.interval), args.scale)
+                                  (args.pixel_size, args.pixel_size, args.interval), args.scale, not args.no_skew)
 
     print('still starting')
 
@@ -108,6 +108,13 @@ def extract_psf(args):
     extract_psf(args)
 
 
+def start_gui(args):
+    import dispim.gui
+
+    app = dispim.gui.DSTApp(0)
+    app.MainLoop()
+
+
 def main():
     p_main = argparse.ArgumentParser()
     sub_parsers = p_main.add_subparsers(dest='cmd')
@@ -127,12 +134,16 @@ def main():
     p_process.add_argument('--single-file-out', action='store_true', default=False)
     p_process.add_argument('--save-inter', action='store_true', default=False)
     p_process.add_argument('--no-save', action='store_true', default=False)
+    p_process.add_argument('--no-skew', action='store_true', default=False)
 
     p_process.set_defaults(func=process)
 
     p_extract = sub_parsers.add_parser('extract')
     p_extract.add_argument('volume', type=str)
     p_extract.set_defaults(func=extract_psf)
+
+    p_gui = sub_parsers.add_parser('gui')
+    p_gui.set_defaults(func=start_gui)
 
     args = p_main.parse_args()
 
