@@ -8,5 +8,6 @@ setup(
         'console_scripts': {
             'dispim = dispim.__main__:main'
         }
-    }, install_requires=['numba', 'matplotlib', 'numpy', 'progressbar', 'scipy']
+    }, install_requires=['numba', 'matplotlib', 'numpy', 'progressbar2', 'scipy', 'progressbar', 'dipy', 'tifffile',
+                         'scikit-image', 'coloredlogs']
 )

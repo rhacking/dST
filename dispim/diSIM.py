@@ -55,11 +55,12 @@ class Samplable(object):
         """
         Sample this volume in a specified plane
 
+        :param volume_size:
+        :param depth_step:
         :param origin: The origin of the sampling plane
         :param v1: The first (unit) vector describing the direction of the sampling plane
         :param v2: The second (unit) vector describing the direction of the sampling plane
         :param plane_step: The distance between two sampling points in the plane
-        :param plane_size: The size of the sampling plane
         :return: A 2d ndarray representing the values of the points that were sampled
         """
         if abs(np.dot(v1, v2)) > 0.00001:

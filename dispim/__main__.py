@@ -1,29 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# import regex
 import argparse
 import logging
 import re
-
-# logging.basicConfig(level='DEBUG')
 
 logger = logging.getLogger(__name__)
 
 ops = ['deskew', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
        'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
-       'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso']
-VAR_SPEC = r"((?:\d+(?:\.\d+))|(?:False)|(?:True)"
+       'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso', 'deconvolve_diag',
+       'extract_psf']
+VAR_SPEC = r"(?P<arg>(?:\d+(?:\.\d+))|(?:False)|(?:True)|(?:[a-zA-Z0-9_./\\]+))"
 OPERATION_SPEC = (r"^(" + "|".join(ops) + r")(?::" + VAR_SPEC + r")?(?:," + VAR_SPEC + ")*$")
+
 
 def process(args):
     print('starting')
+    # import pydevd
+    # pydevd.settrace('localhost', port=8080, stdoutToServer = True, stderrToServer = True)
     import dispim
+    if args.debug:
+        dispim.debug = True
     from dispim import process
     if args.pixel_size > args.interval:
         logger.warning('The pixel size is greater than the interval. Arguments may have been swapped. ')
     volumes = dispim.load_volumes([args.spim_a, args.spim_b] if args.spim_b is not None else [args.spim_a],
                                   (args.pixel_size, args.pixel_size, args.interval), args.scale, not args.no_skew)
+
+    if args.a_invert:
+        logger.debug('A is inverted')
+        volumes[0].inverted = True
+
+    if args.b_flipped_x:
+        volumes[1].flipped[0] = True
+
+    if args.b_flipped_y:
+        volumes[1].flipped[1] = True
+
+    if args.b_flipped_z:
+        volumes[1].flipped[2] = True
+
+    if args.swap_xy_a:
+        volumes[0].data = volumes[0].data.swapaxes(0, 1)
+
+    if args.swap_xy_b:
+        volumes[1].data = volumes[1].data.swapaxes(0, 1)
 
     print('still starting')
 
@@ -83,23 +105,24 @@ def str_to_bool(s):
 
 def image_operation(s: str):
     from dispim import process
-    # from inspect import signature
-    # m = regex.match(OPERATION_SPEC, s)
-    name = s.strip().split(":")[0]
-    sargs = []
-    if len(s.strip().split(":")) > 1:
-        sargs = s.strip().split(":")[1].split(",")
+    import regex
+    m = regex.match(OPERATION_SPEC, s)
 
-    # if m is None:
-    #     raise argparse.ArgumentTypeError("Invalid operation specification")
+    if m is None:
+        raise argparse.ArgumentTypeError("Invalid process argument {}".format(s))
+
+    name = m.group(1)
+
     class_name = 'Process' + name[0].upper() + name[1:]
     class_name = re.sub(r"_(\w)", lambda m: m.group(1).upper(), class_name)
     class_ = getattr(process, class_name)
-    args = [float(sarg) if isfloat(sarg) else str_to_bool(sarg) for sarg in sargs]
+    args = [float(sarg) if isfloat(sarg) else (str_to_bool(sarg) if sarg in ['True', 'False'] else str(sarg)) for sarg
+            in m.captures('arg')]
     try:
         inst = class_(*args)
     except TypeError:
         raise argparse.ArgumentTypeError("Failed to initialize {}".format(class_name))
+
     return inst
 
 
@@ -134,7 +157,15 @@ def main():
     p_process.add_argument('--single-file-out', action='store_true', default=False)
     p_process.add_argument('--save-inter', action='store_true', default=False)
     p_process.add_argument('--no-save', action='store_true', default=False)
+    # TODO: Clean this up
     p_process.add_argument('--no-skew', action='store_true', default=False)
+    p_process.add_argument('--a-invert', action='store_true', default=False)
+    p_process.add_argument('--b-flipped-x', action='store_true', default=False)
+    p_process.add_argument('--b-flipped-y', action='store_true', default=False)
+    p_process.add_argument('--b-flipped-z', action='store_true', default=False)
+
+    p_process.add_argument('--debug', action='store_true', default=False)
+
 
     p_process.set_defaults(func=process)
 
