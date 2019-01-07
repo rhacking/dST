@@ -112,6 +112,8 @@ class ProcessApplyRegistration(ProcessStep):
         #                                    (0, np.max(data[0].shape[2] - transformed.shape[2], 0))),
         #                      mode='constant', constant_values=0)
 
+        print(transformed.mean())
+
         return data[0], data[1].update(transformed, inverted=False, spacing=data[0].spacing, is_skewed=False)
 
 
@@ -216,7 +218,7 @@ class ProcessDeconvolve(ProcessStep):
         else:
             psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
-        return dispim.deconvolve_fast(data[0], data[1], self.iters, psf_A, psf_B),
+        return dispim.deconvolve_psf(data[0], data[1], self.iters, psf_A, psf_B),
 
 
 class ProcessDeconvolveDiag(ProcessStep):
@@ -300,6 +302,21 @@ class ProcessCenterCrop(ProcessStep):
 
         # noinspection PyTypeChecker
         return tuple(result)
+
+
+class ProcessShowFront(ProcessStep):
+    def __init__(self):
+        super().__init__()
+        self.accepts_single = True
+
+    def process(self, data: ProcessData):
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, 2)
+        ax[0].imshow(np.sum(data[0].data, axis=2))
+        ax[1].imshow(np.sum(data[1].data, axis=2))
+        plt.show()
+
+        return data
 
 
 class ProcessShowAIso(ProcessStep):

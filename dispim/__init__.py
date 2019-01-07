@@ -140,7 +140,7 @@ class Volume(object):
                    int(h / 2 * icropy):int(-h / 2 * icropy),
                    int(l / 2 * icropz):int(-l / 2 * icropz)]
         else:
-            view = self.data[:w * (1 - icropx), :h * (1 - icropy), :l * (1 - icropz)]
+            view = self.data[:int(w * (1 - icropx)), :int(h * (1 - icropy)), :int(l * (1 - icropz))]
 
         # FIXME: Do something clever
         result = Volume(view, self.inverted, self.spacing, is_skewed=self.is_skewed, flipped=self.flipped)
@@ -414,14 +414,23 @@ def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.nd
                                      AffineMap,
                                      )
     from dipy.align.transforms import (TranslationTransform3D,
-                                       RigidTransform3D)
+                                       RigidTransform3D,
+                                       AffineTransform3D)
 
     # FIXME: Cropping doesn't work!!!!
-    subvol_a = vol_a.crop_view(crop, center_crop=False)
-    subvol_b = vol_b.crop_view(crop, center_crop=False)
+    # subvol_a = vol_a.crop_view(1, center_crop=False)
+    # subvol_b = vol_b.crop_view(1, center_crop=False)
+    subvol_a = vol_a
+    subvol_b = vol_b
 
     logger.debug('Sub-volume A size: ' + str(subvol_a.shape))
     logger.debug('Sub-volume B size: ' + str(subvol_b.shape))
+
+    print(subvol_a.grid_to_world, subvol_a.flipped, subvol_a.inverted, subvol_a.spacing)
+    print(subvol_b.grid_to_world, subvol_b.flipped, subvol_b.inverted, subvol_b.spacing)
+
+    logger.debug(hash(vol_a.data.tostring()))
+    logger.debug(hash(vol_b.data.tostring()))
 
     if init_translation is not None:
         init = AffineMap(np.array([
@@ -436,14 +445,16 @@ def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.nd
                                          subvol_b.data,
                                          subvol_b.grid_to_world)
 
+    print(init)
+
     nbins = 32
     metric = MutualInformationMetric(nbins, sampling_prop)
 
-    level_iters = [100000, 10000, 10000, 10000, 1500, 1500]
+    level_iters = [10000, 10000, 1500, 1500]
 
-    sigmas = [32.0, 16.0, 8.0, 4.0, 2.0, 0.03]
+    sigmas = [7.0, 4.0, 2.0, 0.03]
 
-    factors = [8, 4, 4, 2, 2, 1]
+    factors = [8, 2, 2, 1]
 
     affreg = AffineRegistration(metric=metric,
                                 level_iters=level_iters,
@@ -468,22 +479,22 @@ def register_dipy(vol_a: Volume, vol_b: Volume, init_translation: Optional[np.nd
 
     logger.debug('Registration rigid: ' + str(rigid))
 
-    # affreg = AffineRegistration(metric=metric,
-    #                             level_iters=[50000, 2000, 120],
-    #                             sigmas=sigmas,
-    #                             factors=factors)
-    #
-    # transform = AffineTransform3D()
-    # params0 = None
-    # starting_affine = rigid.affine
+    affreg = AffineRegistration(metric=metric,
+                                level_iters=[2000, 1000],
+                                sigmas=[2.0, 0.03],
+                                factors=[2, 1])
 
-    # affine = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
-    #                          subvol_a.grid_to_world, subvol_b.grid_to_world,
-    #                          starting_affine=starting_affine)
+    transform = AffineTransform3D()
+    params0 = None
+    starting_affine = rigid.affine
 
-    logger.debug('Registration affine: ' + str(rigid))
+    affine = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
+                             subvol_a.grid_to_world, subvol_b.grid_to_world,
+                             starting_affine=starting_affine)
 
-    vol_b.world_transform = np.array(rigid.affine)
+    logger.debug('Registration affine: ' + str(affine))
+
+    vol_b.world_transform = np.array(affine.affine)
 
     return vol_a, vol_b
 
@@ -577,10 +588,19 @@ def multiview_data_to_density(multiview_data, psf_A, psf_B, out=None):
     return density
 
 
+def fft_centered(arr, newshape):
+    # Return the center newshape portion of the array.
+    newshape = np.asarray(newshape)
+    currshape = np.array(arr.shape)
+    startind = (currshape - newshape) // 2
+    endind = startind + newshape
+    myslice = [slice(startind[k], endind[k]) for k in range(len(endind))]
+    return arr[tuple(myslice)]
+
+
 def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
-    import gputools
     from scipy.signal import fftconvolve
-    gputools.config.init_device(id_device=1, id_platform=0)
+    from scipy import fftpack
     # FIXME: "Most (all?) FFT packages only work well (performance-wise) with sizes that do not have any large prime
     # FIXME: factors. Rounding the signal and kernel size up to the next power of two is a common practice that may
     # FIXME; result in a (very) significant speed-up." (
@@ -593,23 +613,19 @@ def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume
     psf_Ai = psf_A[::-1, ::-1, ::-1]
     psf_Bi = psf_B[::-1, ::-1, ::-1]
 
-    print(np.sum(psf_A))
-    print(np.sum(psf_B))
-
-    print(psf_A.dtype)
-
-    mvd = np.zeros((2,) + vol_a.shape)
-    mvd[0, :, :, :] = vol_a.data
-    mvd[1, :, :, :] = vol_b.data
-
-    # estimate = np.ones_like(vol_a.data)
-    # estimate = np.full(view_a.shape, 0.5)
     estimate = (view_a + view_b) / 2
-    expected_data = np.zeros_like(mvd)
-    correction_factor = np.zeros_like(estimate)
-    print(estimate.dtype)
-    print(correction_factor.dtype)
-    print(estimate.max())
+
+    s1 = np.array(view_a.shape)
+    s2 = np.array(psf_A.shape)
+
+    shape = s1 + s2 - 1
+
+    fshape = [fftpack.helper.next_fast_len(int(d)) for d in shape]
+    fslice = tuple([slice(0, int(sz)) for sz in shape])
+    psf_A_fft = np.fft.rfftn(psf_A, fshape)
+    psf_B_fft = np.fft.rfftn(psf_B, fshape)
+    psf_Ai_fft = np.fft.rfftn(psf_Ai, fshape)
+    psf_Bi_fft = np.fft.rfftn(psf_Bi, fshape)
 
     if debug:
         last = estimate
@@ -627,11 +643,21 @@ def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume
             # print(((fftconvolve(estimate, psf_A, mode='same') + 1e-7)).max())
             # print(estimate.max())
             # print(estimate.min())
-            estimate = estimate * fftconvolve(view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7), psf_Ai,
-                                              mode='same')
+            # estimate = estimate * fftconvolve(view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7), psf_Ai,
+            #                                   mode='same')
+            #
+            # estimate = estimate * fftconvolve(view_b / (fftconvolve(estimate, psf_B, mode='same') + 1e-7), psf_Bi,
+            #                                   mode='same')
 
-            estimate = estimate * fftconvolve(view_b / (fftconvolve(estimate, psf_B, mode='same') + 1e-7), psf_Bi,
-                                              mode='same')
+            blurA = view_a / (fft_centered(np.fft.irfftn(np.fft.rfftn(estimate, fshape) * psf_A_fft, fshape)[fslice],
+                                           s1) + 1e-4)
+            estimate = estimate * fft_centered(np.fft.irfftn(np.fft.rfftn(blurA, fshape) * psf_Ai_fft, fshape)[fslice],
+                                               s1)
+
+            blurB = view_b / (fft_centered(np.fft.irfftn(np.fft.rfftn(estimate, fshape) * psf_B_fft, fshape)[fslice],
+                                           s1) + 1e-4)
+            estimate = estimate * fft_centered(np.fft.irfftn(np.fft.rfftn(blurB, fshape) * psf_Bi_fft, fshape)[fslice],
+                                               s1)
 
             # print(np.percentile(estimate, (99, 99.5, 99.8, 99.9)))
             # print(np.sum(np.abs(estimate-estimate_A)))
@@ -661,7 +687,7 @@ def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
 
-    if debug_f:
+    if debug:
         debug_f.close()
 
     # TODO: Rescaling might be unwanted
@@ -895,9 +921,14 @@ def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: f
 
     # TODO: Handle different data types (aside from uint16)
 
+    # TODO: Make this different
+    from hashlib import sha1
+
     for i in range(len(datas)):
         # TODO: Handle loading n volumes properly or don't handle them at all
         volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), bool(i), spacing, is_skewed=is_skewed))
+        logger.debug(volumes[-1].data.mean())
+        logger.debug(hash(volumes[-1].data.tostring()))
         gc.collect()
 
     return tuple(volumes)
