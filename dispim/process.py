@@ -65,20 +65,25 @@ class ProcessRegister(ProcessStep):
         super().__init__()
         self.crop = crop
         self.sampling_prop = sampling_prop
+        print(sampling_prop)
 
     def process(self, data: ProcessData) -> ProcessData:
         return dispim.register_dipy(data[0], data[1], sampling_prop=self.sampling_prop, crop=self.crop)
 
 
 class ProcessRegister2d(ProcessStep):
+    def __init__(self, axis=2):
+        super().__init__()
+        self.axis = axis
+
     def process(self, data: ProcessData):
-        return dispim.register_2d(*data)
+        return dispim.register_2d(*data, axis=self.axis)
 
 
 class ProcessApplyRegistration(ProcessStep):
     def process(self, data: ProcessData) -> ProcessData:
         from scipy.ndimage import affine_transform
-        min_res = min(np.min(data[0].spacing), np.min(data[1].spacing)) * np.sqrt(2)
+        min_res = min(np.min(data[0].spacing), np.min(data[1].spacing))
         grid_to_world_final = np.eye(4) * np.array([min_res, min_res, min_res, 1])
         transform_a = np.linalg.inv(data[0].grid_to_world)
         # data[1].world_transform[1, 3] /= -np.sqrt(2)
