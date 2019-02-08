@@ -153,6 +153,20 @@ class Volume(object):
         result.psf = self.psf
         return result
 
+    def show_ipv(self):
+        import ipyvolume as ipv
+        return ipv.quickvolshow(self.data)
+
+    def copy(self, data: np.ndarray = None, inverted: bool = None,
+             spacing: Union[Tuple[float, float, float], np.ndarray] = None,
+             is_skewed: bool = None, world_transform: np.ndarray = None, flipped: Tuple[bool, bool, bool] = None):
+        result = Volume(self.data if data is None else data, self.inverted if inverted is None else inverted,
+                        spacing=self.spacing if spacing is None else spacing,
+                        is_skewed=self.is_skewed if is_skewed is None else is_skewed,
+                        flipped=self.flipped if flipped is None else flipped)
+        result.world_transform = self.world_transform if world_transform is None else world_transform
+        return result
+
 
 def save_dual_tiff(name: str, vol_a: Volume, vol_b: Volume, path: str = 'out'):
     from tifffile import imsave
@@ -436,7 +450,7 @@ def register_dipy(vol_a: Volume, vol_b: Volume,
 
     factors = [16, 4, 2, 1]
 
-    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop, sampling_type='grid'),
+    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop),
                                 level_iters=level_iters,
                                 sigmas=sigmas,
                                 factors=factors)
@@ -618,9 +632,6 @@ def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume
     psf_Ai = psf_A[::-1, ::-1, ::-1]
     psf_Bi = psf_B[::-1, ::-1, ::-1]
 
-    np.fft.rfftn = rfft_af
-    np.fft.irfftn = irfft_af
-
     estimate = (view_a + view_b) / 2
 
     # convolve = partial(convolve_fft,
@@ -628,6 +639,63 @@ def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume
     #                    ifftn=partial(pyfftw.interfaces.numpy_fft.irfftn, threads=40),
     #                    allow_huge=True)
     convolve = partial(fftconvolve, mode='same')
+
+    with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
+        for _ in bar(range(n)):
+            estimate = estimate * convolve(view_a / (convolve(estimate, psf_A) + 1e-6), psf_Ai)
+            estimate = estimate * convolve(view_b / (convolve(estimate, psf_B) + 1e-6), psf_Bi)
+
+    CURSOR_UP_ONE = '\x1b[1A'
+    ERASE_LINE = '\x1b[2K'
+    print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
+
+    # TODO: Rescaling might be unwanted
+    e_min, e_max = np.percentile(estimate, [0.001, 99.999])
+    estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
+
+    # estimate = np.clip(estimate, 0, 2**16-1).astype(np.uint16)
+
+    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
+
+def deconvolve_gpu_chunked(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B, nchunks: int):
+    result = np.zeros_like(vol_a.data)
+    chunk_size = vol_a.shape[2] // nchunks
+    for i in range(nchunks):
+        start = i * chunk_size
+        end = (i+1) * chunk_size if i < nchunks-1 else vol_a.shape[2]
+        chunk_est = deconvolve_gpu(Volume(vol_a.data[:, :, start:end], False, (1, 1, 1)), Volume(vol_b.data[:, :, start:end], False, (1, 1, 1)), n, psf_A, psf_B)
+
+        result[:, :, start:end] = chunk_est.data
+
+    return Volume(result, False, (1, 1, 1))
+
+
+def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
+    # from astropy.convolution import convolve_fft
+    from functools import partial
+    import arrayfire as af
+    view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
+
+    psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
+    psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
+    psf_Ai = psf_A[::-1, ::-1, ::-1]
+    psf_Bi = psf_B[::-1, ::-1, ::-1]
+
+    view_a = af.cast(af.from_ndarray(view_a), af.Dtype.f32)
+    view_b = af.cast(af.from_ndarray(view_b), af.Dtype.f32)
+
+    psf_A = af.cast(af.from_ndarray(psf_A), af.Dtype.f32)
+    psf_B = af.cast(af.from_ndarray(psf_B), af.Dtype.f32)
+    psf_Ai = af.cast(af.from_ndarray(psf_Ai), af.Dtype.f32)
+    psf_Bi = af.cast(af.from_ndarray(psf_Bi), af.Dtype.f32)
+
+    estimate = (view_a + view_b) / 2
+
+    # convolve = partial(convolve_fft,
+    #                    fftn=partial(pyfftw.interfaces.numpy_fft.rfftn, threads=40),
+    #                    ifftn=partial(pyfftw.interfaces.numpy_fft.irfftn, threads=40),
+    #                    allow_huge=True)
+    convolve = partial(af.fft_convolve3)
 
     with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
         for _ in bar(range(n)):

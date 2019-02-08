@@ -47,7 +47,7 @@ class Samplable(object):
         points = (trans @ local_points).T + origin
 
         samples = self.sample_points(points)
-        return np.clip(np.reshape(samples, (len(ypoints), len(xpoints))).astype(np.float64), 0.0, 1.0).T
+        return np.reshape(samples, (len(ypoints), len(xpoints))).T
 
     def sample_volume(self, origin: np.ndarray, v1: np.ndarray, v2: np.ndarray,
                       plane_step: float, depth_step: float,
@@ -153,7 +153,8 @@ class SampleVolume(Samplable):
         :param points: The list of points to transform
         :return: An ndarray containing the transformed points
         """
-        return np.array([point / self.resolution for point in points])
+        half_size = np.floor_divide(self.data.shape, 2)
+        return np.array([point / self.resolution + half_size for point in points])
 
     def sample_points(self, points: np.ndarray):
         """
@@ -164,8 +165,9 @@ class SampleVolume(Samplable):
         @return: A list of values sampled from the volume, in the order of
         the points input array
         """
+        import scipy.ndimage
         x, y, z = self.to_array_space(points).T[0:3]
-        return scipy.ndimage.map_coordinates(self.data, [x, y, z])
+        return scipy.ndimage.map_coordinates(self.data, [x, y, z], order=1)
 
     # def show(self):
     #     mlab.pipeline.volume(mlab.pipeline.scalar_field(self.data))
@@ -190,6 +192,7 @@ def generate_linear_volume(size: np.ndarray, resolution: np.ndarray, start=0,
 def fwhm_to_sigma(fwhm):
     return fwhm / (2 * math.sqrt(2 * math.log(2)))
 
+from numba import jit
 
 def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: int = 2,
          interval: float = 0.3, plane_size=6, gaussian: bool = True,
@@ -200,7 +203,7 @@ def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: in
     v3 = []
     scan_vol = []
     start = np.array([-plane_size, -plane_size * (math.sqrt(2) / 2), 0])
-    volume_depth = 40.0
+    volume_depth = 10.0
 
     weights = []
 
@@ -220,7 +223,6 @@ def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: in
             sheet_points = []
             for i in np.linspace(-slices_side * gaussian_delta, slices_side * gaussian_delta, int(slices_side * 2 + 1)):
                 shifted_start = start + v3 * i
-                # print(shifted_start - start)
                 points = vol.sample_plane(shifted_start + np.array([0, 0, z]),
                                           v1, v2, pixel_size / pixel_samples, (plane_size * 2, plane_size * 2))
                 m, n = points.shape
@@ -228,71 +230,132 @@ def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: in
                 points = points.reshape(m // block_size, block_size, n // block_size, block_size).mean((1, 3),
                                                                                                        keepdims=True).reshape(
                     m // block_size, n // block_size)
-                # if np.linalg.norm(v3*i+np.array([0, 0, z])) < 0.00001:
-                #     print(np.max(points))
                 sheet_points.append(points)
 
-            # blurred_slice = scipy.ndimage.filters.gaussian_filter(sheet_points, (sigma/gaussian_delta, 0, 0), mode='constant')[int((len(sheet_points)-1)/2)]
             blurred_slice = np.average(sheet_points, axis=0, weights=weights)
-            # if np.max(blurred_slice) > 0.004:
-            #     plt.plot(np.max(sheet_points, axis=(1, 2)))
-            #     plt.show()
-            #     blurred = scipy.ndimage.filters.gaussian_filter(sheet_points, (sigma/gaussian_delta, 0, 0), mode='constant')
-            #     plt.plot(np.max(blurred, axis=(1, 2)))
-            #     plt.show()
             scan_vol.append(blurred_slice)
-            # shifted_start = start + v3 * -slices_side*gaussian_delta + np.array([0, 0, z])
-            # slab = vol.sample_volume(shifted_start, v1, v2, pixel_size/pixel_samples, gaussian_delta,
-            #                            (plane_size * 2, plane_size * 2, gaussian_delta*int(slices_side*2+1)))
-            # # slice = np.average(slab, axis=2, weights=weights)
-            # slice = scipy.ndimage.filters.gaussian_filter(slab, (0, 0, sigma / gaussian_delta))[:, :,
-            #     slices_side]
-            # del slab
-            # m, n = slice.shape
-            # block_size = pixel_samples
-            # slice = slice.reshape(m // block_size, block_size, n // block_size, block_size).mean((1, 3), keepdims=True)\
-            #     .reshape(m // block_size, n // block_size)
-            # scan_vol.append(slice)
 
     # Simply return the scanned volume
     result = np.array(scan_vol)
     result = np.swapaxes(result, 0, 2)
     result = np.swapaxes(result, 0, 1)
-    result_vol = dispim.Volume(result, (pixel_size, pixel_size, interval / math.sqrt(2)))
+    result_vol = dispim.Volume(result, right, (pixel_size, pixel_size, interval / np.sqrt(2)))
     return result_vol
 
-
-def plot3d(data, spacing):
-    field = mlab.pipeline.scalar_field(data)
-    field.spacing = spacing
-    mlab.pipeline.volume(field, vmin=0, vmax=0.8)
+# from numba import njit
+#
+# @njit()
+# def sample_plane(vol, resolution, origin: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+#                  plane_step: float,
+#                  plane_size: Tuple[int, int]) -> np.ndarray:
+#     """
+#     Sample this volume in a specified plane
+#
+#     :param origin: The origin of the sampling plane
+#     :param v1: The first (unit) vector describing the direction of the sampling plane
+#     :param v2: The second (unit) vector describing the direction of the sampling plane
+#     :param plane_step: The distance between two sampling points in the plane
+#     :param plane_size: The size of the sampling plane
+#     :return: A 2d ndarray representing the values of the points that were sampled
+#     """
+#     if abs(np.dot(v1, v2)) > 0.00001:
+#         raise ValueError('Plane vectors must be perpendicular')
+#
+#     xpoints = np.linspace(0, plane_size[0], int(plane_size[0] / plane_step))
+#     ypoints = np.linspace(0, plane_size[1], int(plane_size[1] / plane_step))
+#
+#     # xv, yv = np.meshgrid(xpoints, ypoints)
+#     # xv = xv.ravel()
+#     # yv = yv.ravel()
+#     local_points = np.zeros((3, len(xpoints)*len(ypoints)))
+#     i = 0
+#     for x in xpoints:
+#         for y in ypoints:
+#             local_points[0, i] = x
+#             local_points[1, i] = y
+#
+#             i+=1
+#     # local_points = np.vstack((xv, yv, np.zeros(xv.shape[0])))
+#     v3 = np.cross(v2, v1)
+#     trans = np.vstack([v1, v2, v3])
+#     half_size = np.floor_divide(vol.shape, 2)
+#     # trans_to_array = np.array([
+#     #     [resolution[0], 0, 0, half_size[0]],
+#     #     [0, resolution[1], 0, half_size[1]],
+#     #     [0, 0, resolution[2], half_size[2]],
+#     #     [0, 0, 0, 1]
+#     # ])
+#     points = (trans @ local_points).T + origin
+#
+#     np.array([point / resolution + half_size for point in points])
+#
+#     x, y, z = points.T[0:3]
+#     samples = scipy.ndimage.map_coordinates(vol, [x, y, z], order=1)
+#
+#     return np.reshape(samples, (len(ypoints), len(xpoints))).T
+#
+#
+# def scan_vol(vol: np.ndarray, vol_resolution, right: bool, pixel_size: float = 0.3, pixel_samples: int = 2,
+#          interval: float = 0.3, plane_size=6, gaussian: bool = True,
+#          gaussian_delta: float = 0.078, gaussian_FWHM: float = 1.0) -> dispim.Volume:
+#     v1 = np.array([1, 0, 0], dtype=np.float64)
+#     v2 = np.array([0, math.sqrt(2) / 2, -math.sqrt(2) / 2]) if right else \
+#         np.array([0, math.sqrt(2) / 2, math.sqrt(2) / 2])
+#     v3 = []
+#     scan_vol = []
+#     start = np.array([-plane_size, -plane_size * (math.sqrt(2) / 2), 0])
+#     volume_depth = 40.0
+#
+#     weights = []
+#
+#     if gaussian:
+#         v3 = np.cross(v1, v2)
+#         slices_side = gaussian_FWHM / gaussian_delta * 2
+#         sigma = fwhm_to_sigma(gaussian_FWHM)
+#         weights = [norm.pdf(x, loc=0, scale=sigma) for x in
+#                    np.linspace(-slices_side * gaussian_delta, slices_side * gaussian_delta, int(slices_side * 2 + 1))]
+#
+#     for z in np.linspace(-volume_depth / 2, volume_depth / 2, int(volume_depth / interval)):
+#         if not gaussian:
+#             points = sample_plane(vol, vol_resolution, start + np.array([0, 0, z]),
+#                                       v1, v2, pixel_size, (plane_size * 2, plane_size * 2))
+#             scan_vol.append(points)
+#         else:
+#             sheet_points = []
+#             for i in np.linspace(-slices_side * gaussian_delta, slices_side * gaussian_delta, int(slices_side * 2 + 1)):
+#                 shifted_start = start + v3 * i
+#                 points = sample_plane(vol, vol_resolution, shifted_start + np.array([0, 0, z]),
+#                                           v1, v2, pixel_size / pixel_samples, (plane_size * 2, plane_size * 2))
+#                 m, n = points.shape
+#                 block_size = pixel_samples
+#                 points = points.reshape(m // block_size, block_size, n // block_size, block_size).mean((1, 3),
+#                                                                                                        keepdims=True).reshape(
+#                     m // block_size, n // block_size)
+#                 sheet_points.append(points)
+#
+#             blurred_slice = np.average(sheet_points, axis=0, weights=weights)
+#             scan_vol.append(blurred_slice)
+#
+#     # Simply return the scanned volume
+#     result = np.array(scan_vol)
+#     result = np.swapaxes(result, 0, 2)
+#     result = np.swapaxes(result, 0, 1)
+#     result_vol = dispim.Volume(result, right, (pixel_size, pixel_size, interval / math.sqrt(2)))
+#     return result_vol
 
 
 def test():
-    vol = SampleSphere(4)
+    # vol = SampleSphere(4)
     # vol = SampleBeads(40)
+    vol = SampleVolume(np.random.rand(128, 128, 128), (0.2, 0.2, 0.2))
     # vol = SampleEllipsoid((3, 3, 7))
 
     print("Scanning from A")
     scan_vol_A = scan(vol, False, gaussian=False, gaussian_FWHM=0.2)
-    scan_vol_A = dispim.Volume((scan_vol_A.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_A.spacing)
-    scan_vol_A.save_tiff('test_A')
     print("Deskewing A")
-    deskewed_A = dispim.unshift_fast(scan_vol_A, False)
-    deskewed_A.save_tiff_single('sim_beads_A')
-    deskewed_A.data *= 1
-    print(np.max(deskewed_A.data))
-    deskewed_A.save_tiff('test_A_deskew')
-    #
+
     print("Scanning from B")
     scan_vol_B = scan(vol, True, gaussian=False, gaussian_FWHM=0.2)
-    scan_vol_B = dispim.Volume((scan_vol_B.data * (2 ** 16 - 1)).astype(np.uint16), scan_vol_B.spacing)
-    scan_vol_B.save_tiff('test_B')
-    print("Deskewing B")
-    deskewed_B = dispim.unshift_fast(scan_vol_B, True)
-    # deskewed_B.save_tiff_single('sim_beads_B')
-    deskewed_B.save_tiff('test_B_deskew')
-    # deskewed_B = deskewed_B.rot90()
 
     # print("Aligning images")
     # shift = dispim.get_com_image_shift(deskewed_A, deskewed_B)

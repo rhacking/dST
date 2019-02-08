@@ -119,7 +119,7 @@ class ProcessApplyRegistration(ProcessStep):
 
         print(transformed.mean())
 
-        return data[0], data[1].update(transformed, inverted=False, spacing=data[0].spacing, is_skewed=False)
+        return data[0], data[1].copy(transformed, inverted=False, spacing=data[0].spacing, is_skewed=False)
 
 
 class ProcessRegisterSyn(ProcessStep):
@@ -224,6 +224,45 @@ class ProcessDeconvolve(ProcessStep):
             psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
         return dispim.deconvolve_psf(data[0], data[1], self.iters, psf_A, psf_B),
+
+
+class ProcessDeconvolveChunked(ProcessStep):
+    def __init__(self, iters: int = 24, nchunks: int = 3, psf_A: str = None, psf_B: str = None):
+        super().__init__()
+        self.psf_A = psf_A
+        self.psf_B = psf_B
+        self.nchunks = int(nchunks)
+        self.iters = int(iters)
+
+    def process(self, data: ProcessData) -> ProcessData:
+        if np.all(data[0].spacing != data[1].spacing):
+            logger.error('Both volumes must have equal resolution to deconvolve. ')
+        if np.all(data[0].data.shape != data[1].data.shape):
+            logger.error('Both volumes must have equal dimensions to deconvolve. ')
+
+        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
+
+        from tifffile import imread
+
+        logger.info('Deconvolving...')
+        # blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
+        # blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b/data[1].resolution[1], axis=1)
+
+        if self.psf_A is None:
+            if data[0].psf is None:
+                raise ValueError("No point spread function specified for A")
+            psf_A = data[0].psf
+        else:
+            psf_A = imread(self.psf_A).swapaxes(0, 2).swapaxes(0, 1)
+
+        if self.psf_B is None:
+            if data[1].psf is None:
+                raise ValueError("No point spread function specified for B")
+            psf_B = data[1].psf
+        else:
+            psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
+
+        return dispim.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_A, psf_B, nchunks=self.nchunks),
 
 
 class ProcessDeconvolveDiag(ProcessStep):
