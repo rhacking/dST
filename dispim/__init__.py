@@ -6,7 +6,8 @@ import math
 import os
 import shutil
 import warnings
-from typing import Tuple, Union, Callable, List, Optional
+from typing import Tuple, Union, Callable, List
+import arrayfire as af
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,6 +15,9 @@ import progressbar
 import scipy
 from numba import jit, prange
 from scipy import ndimage
+from dipy.align.transforms import TranslationTransform3D, TranslationTransform2D
+
+from dispim import metrack
 
 logger = logging.getLogger(__name__)
 
@@ -24,20 +28,61 @@ BlurFunction = Callable[[np.ndarray], np.ndarray]
 debug = False
 
 
-class Volume(object):
-    def __init__(self, data: np.ndarray, inverted: bool, spacing: Union[Tuple[float, float, float], np.ndarray],
-                 is_skewed: bool = True, flipped: List[bool] = None):
-        self.psf = None
-        self.data = data
-        self.world_transform = np.eye(4)
-        self.is_skewed = is_skewed
-        self.inverted = inverted
-        self.flipped = [False, False, False] if flipped is None else flipped
-        self.spacing = np.array(spacing) if isinstance(spacing, tuple) else spacing
+class Volume(np.ndarray):
+    def __new__(cls, input_array, inverted: bool = None,
+                spacing: Union[Tuple[float, float, float], np.ndarray] = None,
+                is_skewed: bool = None, flipped: Tuple[bool] = None,
+                world_transform: np.ndarray = None, psf: np.ndarray = None):
+        # Create the ndarray instance of our type, given the usual
+        # ndarray input arguments.  This will call the standard
+        # ndarray constructor, but return an object of our type.
+        # It also triggers a call to InfoArray.__array_finalize__Ø
+        obj = np.asarray(input_array).view(cls)
+        # set the new 'info' attribute to the value passed
+        obj.inverted = inverted if inverted is not None else getattr(input_array, 'inverted', False)
+        obj.spacing = spacing if spacing is not None else getattr(input_array, 'spacing', (1, 1, 1))
+        obj.is_skewed = is_skewed if is_skewed is not None else getattr(input_array, 'is_skewed', False)
+        obj.flipped = flipped if flipped is not None else getattr(input_array, 'flipped', (False, False, False))
+        obj.world_transform = world_transform if world_transform is not None else getattr(input_array,
+                                                                                          'world_transform', np.eye(4))
+        obj.psf = psf if psf is not None else getattr(input_array, 'psf', None)
 
-    @property
-    def shape(self):
-        return self.data.shape
+        obj.flags.writeable = False
+        obj.initialized = True
+        # Finally, we must return the newly created object:
+        return obj
+
+    def __array_finalize__(self, obj):
+        # ``self`` is a new object resulting from
+        # ndarray.__new__(InfoArray, ...), therefore it only has
+        # attributes that the ndarray.__new__ constructor gave it -
+        # i.e. those of a standard ndarray.
+        #
+        # We could have got to the ndarray.__new__ call in 3 ways:
+        # From an explicit constructor - e.g. InfoArray():
+        #    obj is None
+        #    (we're in the middle of the InfoArray.__new__
+        #    constructor, and self.info will be set when we return to
+        #    InfoArray.__new__)
+        if obj is None: return
+        # From view casting - e.g arr.view(InfoArray):
+        #    obj is arr
+        #    (type(obj) can be InfoArray)
+        # From new-from-template - e.g infoarr[:3]
+        #    type(obj) is InfoArray
+        #
+        # Note that it is here, rather than in the __new__ method,
+        # that we set the default value for 'info', because this
+        # method sees all creation of default objects - with the
+        # InfoArray.__new__ constructor, but also with
+        # arr.view(InfoArray).
+        self.inverted = getattr(obj, 'inverted', False)
+        self.spacing = getattr(obj, 'spacing', (1, 1, 1))
+        self.is_skewed = getattr(obj, 'is_skewed', False)
+        self.flipped = getattr(obj, 'flipped', (False, False, False))
+        self.world_transform = getattr(obj, 'world_transform', np.eye(4))
+        self.psf = getattr(obj, 'psf', None)
+        # We do not need to return anything
 
     @property
     def grid_to_world(self) -> np.ndarray:
@@ -48,9 +93,9 @@ class Volume(object):
             [0, 0, 0, 1]
         ])
         result = result @ np.array([
-            [-1 if self.flipped[0] else 1, 0, 0, 0],
-            [0, -1 if self.flipped[1] else 1, 0, 0],
-            [0, 0, -1 if self.flipped[2] else 1, 0],
+            [-1 if self.flipped[0] else 1, 0, 0, self.shape[0] if self.flipped[0] else 0],
+            [0, -1 if self.flipped[1] else 1, 0, self.shape[1] if self.flipped[1] else 0],
+            [0, 0, -1 if self.flipped[2] else 1, self.shape[2] if self.flipped[2] else 0],
             [0, 0, 0, 1]
         ])
         if self.is_skewed:
@@ -63,109 +108,20 @@ class Volume(object):
             ])
         return result
 
-    def grid_to_world_2d(self, red_axis):
+    def grid_to_world_2d(self, red_axis: int) -> np.ndarray:
         g2w = self.grid_to_world
         axes = np.ones((4,), dtype=np.bool)
         axes[red_axis] = False
         return g2w[axes][:, axes]
 
-    def save_tiff_single(self, name: str, invert=False, swap_xy=False, path='out'):
-        from tifffile import imsave
-        logger.debug('Saving single tif {} with shape {}'.format(name, self.data.shape))
-        if not os.path.exists(path):
-            os.makedirs(path)
-        if os.path.exists(path + '/' + name):
-            shutil.rmtree(path + '/' + name)
-        os.makedirs(path + '/' + name)
-        data = self.data
-        if invert:
-            data = np.swapaxes(data, 0, 2)
-            data = np.flipud(data)
-            data = np.swapaxes(data, 0, 2)
-        if swap_xy:
-            data = np.swapaxes(data, 0, 1)
-        data = np.swapaxes(data, 1, 0).swapaxes(2, 0)
-
-        imsave(path + '/' + name + '/' + name + '.tif', data)
-
-    def save_tiff(self, name: str, invert=False, swap_xy=False, path='out'):
-        from tifffile import imsave
-        if not os.path.exists(path):
-            os.makedirs(path)
-        if os.path.exists(path + '/' + name):
-            shutil.rmtree(path + '/' + name)
-        os.makedirs(path + '/' + name)
-        data = self.data
-        print(data.dtype)
-        if invert:
-            data = np.swapaxes(data, 0, 2)
-            data = np.flipud(data)
-            data = np.swapaxes(data, 0, 2)
-            data = np.swapaxes(data, 0, 2)
-        if swap_xy:
-            data = np.swapaxes(data, 0, 1)
-        for slc_index in range(data.shape[2]):
-            imsave(path + '/' + name + '/' + name + str(slc_index) + '.tif',
-                   (data[:, :, slc_index] / 2 ** 8).astype(np.uint8).T)
-
-    def update(self, data: np.ndarray = None, inverted: bool = None,
-               spacing: Union[Tuple[float, float, float], np.ndarray] = None,
-               is_skewed: bool = None, world_transform: np.ndarray = None, flipped: Tuple[bool, bool, bool] = None):
-        # TODO: Handle this more nicely
-        if data is not None:
-            self.data = data
-        if world_transform is not None:
-            self.world_transform = world_transform
-        if is_skewed is not None:
-            self.is_skewed = is_skewed
-        if inverted is not None:
-            self.inverted = inverted
-        if spacing is not None:
-            self.spacing = np.array(spacing) if isinstance(spacing, tuple) else spacing
-        if flipped is not None:
-            self.flipped = flipped
-
-        return self
-
-    def crop_view(self, crop: Union[float, Tuple[float, float, float]], center_crop: bool = True):
-        if type(crop) == float or type(crop) == int:
-            if crop > 0.99999:
-                return self
-            icropx = 1 - crop
-            icropy = 1 - crop
-            icropz = 1 - crop
+    def __setattr__(self, name, value):
+        if hasattr(self, 'initialized'):
+            """"""
+            msg = "'%s' has no attribute %s" % (self.__class__,
+                                                name)
+            raise AttributeError(msg)
         else:
-            icropx = 1 - crop[0]
-            icropy = 1 - crop[1]
-            icropz = 1 - crop[2]
-
-        w, h, l = self.shape
-
-        if center_crop:
-            view = self.data[int(w / 2 * icropx):int(-w / 2 * icropx),
-                   int(h / 2 * icropy):int(-h / 2 * icropy),
-                   int(l / 2 * icropz):int(-l / 2 * icropz)]
-        else:
-            view = self.data[:int(w * (1 - icropx)), :int(h * (1 - icropy)), :int(l * (1 - icropz))]
-
-        # FIXME: Do something clever
-        result = Volume(view, self.inverted, self.spacing, is_skewed=self.is_skewed, flipped=self.flipped)
-        result.psf = self.psf
-        return result
-
-    def show_ipv(self):
-        import ipyvolume as ipv
-        return ipv.quickvolshow(self.data)
-
-    def copy(self, data: np.ndarray = None, inverted: bool = None,
-             spacing: Union[Tuple[float, float, float], np.ndarray] = None,
-             is_skewed: bool = None, world_transform: np.ndarray = None, flipped: Tuple[bool, bool, bool] = None):
-        result = Volume(self.data if data is None else data, self.inverted if inverted is None else inverted,
-                        spacing=self.spacing if spacing is None else spacing,
-                        is_skewed=self.is_skewed if is_skewed is None else is_skewed,
-                        flipped=self.flipped if flipped is None else flipped)
-        result.world_transform = self.world_transform if world_transform is None else world_transform
-        return result
+            np.ndarray.__setattr__(self, name, value)
 
 
 def save_dual_tiff(name: str, vol_a: Volume, vol_b: Volume, path: str = 'out'):
@@ -175,7 +131,6 @@ def save_dual_tiff(name: str, vol_a: Volume, vol_b: Volume, path: str = 'out'):
     if os.path.exists(path + '/' + name):
         shutil.rmtree(path + '/' + name)
     os.makedirs(path + '/' + name)
-    print(vol_a.data.shape, vol_b.data.shape)
     data = np.array([vol_a.data, vol_b.data, np.zeros(vol_a.data.shape)])
 
     for slc_index in range(data.shape[3]):
@@ -368,760 +323,390 @@ def register_manual_translation(vol_a: Volume, vol_b: Volume) -> np.ndarray:
     return np.array([points[1][0] - points[0][0], points[1][1] - points[0][1], points2[1][1] - points2[0][1]])
 
 
-def register_syn(vol_a: Volume, vol_b: Volume):
-    from dipy.align.imwarp import SymmetricDiffeomorphicRegistration
-    from dipy.align.metrics import CCMetric
+def register_2d(vol_a: Volume, vol_b: Volume, axis: int = 2, transform_cls: type = TranslationTransform2D) -> Tuple[
+    Volume, Volume]:
+    from dipy.align.imaffine import (MutualInformationMetric,
+                                     AffineRegistration)
+    from dispim.metrics import MUTUAL_INFORMATION_METRIC, MUTUAL_INFORMATION_GRADIENT_METRIC
 
-    metric = CCMetric(3)
-    level_iters = [8, 8, 4]
-    sdr = SymmetricDiffeomorphicRegistration(metric, level_iters)
-
-    mapping = sdr.optimize(vol_a.data, vol_b.data, vol_a.grid_to_world, vol_b.grid_to_world, None)
-
-    transformed_b = mapping.transform(vol_b.data)
-
-    return vol_a, vol_b.update(data=transformed_b)
-
-
-def register_2d(vol_a: Volume, vol_b: Volume, axis=2):
-    from dipy.align.imaffine import (transform_centers_of_mass,
-                                     MutualInformationMetric,
-                                     AffineRegistration,
-                                     )
-    from dipy.align.transforms import RigidTransform2D
     vol_a_flat = np.mean(vol_a.data, axis=axis)
     vol_b_flat = np.mean(vol_b.data, axis=axis)
 
+    if metrack.is_tracked(MUTUAL_INFORMATION_METRIC) or metrack.is_tracked(MUTUAL_INFORMATION_GRADIENT_METRIC):
+        def callback(value: float, gradient: float):
+            metrack.append_metric(MUTUAL_INFORMATION_METRIC, (None, value))
+            metrack.append_metric(MUTUAL_INFORMATION_GRADIENT_METRIC, (None, gradient))
+    else:
+        callback = None
+
     nbins = 32
     sampling_prop = None
-    metric = MutualInformationMetric(nbins, sampling_prop)
+    metric = MutualInformationMetric(nbins, sampling_prop, sampling_type='grid')
 
-    level_iters = [500000, 50000, 3000, 2000]
-    sigmas = [7.0, 5.0, 2.0, 0.0]
-    factors = [8, 4, 2, 1]
+    level_iters = [1000000, 500000, 200000, 70000, 70000]
+    sigmas = [7.0, 3.0, 2.0, 1.0, 0.0]
+    factors = [4, 2, 2, 1, 1]
 
     affreg = AffineRegistration(metric=metric,
                                 level_iters=level_iters,
                                 sigmas=sigmas,
                                 factors=factors)
 
-    transform = RigidTransform2D()
+    transform = transform_cls()
     params0 = None
-    print(vol_a.grid_to_world_2d(axis), vol_b.grid_to_world_2d(axis))
-    init = transform_centers_of_mass(vol_a_flat, vol_a.grid_to_world_2d(axis), vol_b_flat, vol_b.grid_to_world_2d(axis))
-
-    starting_affine = init.affine
+    axes = np.ones((4,), dtype=np.bool)
+    axes[axis] = False
+    starting_affine = vol_b.world_transform[axes][:, axes]
 
     affine = affreg.optimize(vol_a_flat, vol_b_flat, transform, params0,
                              vol_a.grid_to_world_2d(axis), vol_b.grid_to_world_2d(axis),
                              starting_affine=starting_affine)
 
-    b_trans = affine.affine
-    b_trans = np.insert(b_trans, axis, np.zeros((3,)), 0)
-    b_trans = np.insert(b_trans, axis, np.zeros((4,)), 1)
-    b_trans[axis, axis] = 1
-
-    return vol_a, vol_b.update(world_transform=b_trans)
-
-
-def register_dipy(vol_a: Volume, vol_b: Volume,
-                  sampling_prop: float = 1.0, crop: float = 0.8):
-    from dipy.align.imaffine import (transform_centers_of_mass,
-                                     MutualInformationMetric,
-                                     AffineRegistration,
-                                     AffineMap,
-                                     )
-    from dipy.align.transforms import (TranslationTransform3D,
-                                       RigidTransform3D,
-                                       AffineTransform3D)
-
-    print(sampling_prop)
-
-    # FIXME: Cropping doesn't work!!!!
-    subvol_a = vol_a.crop_view(crop, center_crop=False)
-    subvol_b = vol_b.crop_view(crop, center_crop=False)
-
-    logger.debug('Sub-volume A size: ' + str(subvol_a.shape))
-    logger.debug('Sub-volume B size: ' + str(subvol_b.shape))
-
-    level_iters = [20000, 10000, 5500, 800]
-
-    sigmas = [12.0, 3.0, 1.0, 0.0]
-
-    factors = [16, 4, 2, 1]
-
-    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop),
-                                level_iters=level_iters,
-                                sigmas=sigmas,
-                                factors=factors)
-
-    transform = TranslationTransform3D()
-    params0 = None
-    starting_affine = vol_b.world_transform
-    translation = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
-                                  subvol_a.grid_to_world, subvol_b.grid_to_world,
-                                  starting_affine=starting_affine)
-
-    logger.debug('Registration translation: ' + str(translation))
-
-    transform = RigidTransform3D()
-    params0 = None
-    starting_affine = translation.affine
-    rigid = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
-                            subvol_a.grid_to_world, subvol_b.grid_to_world,
-                            starting_affine=starting_affine)
-
-    logger.debug('Registration rigid: ' + str(rigid))
-
-    # affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop, sampling_type='grid'),
-    #                             level_iters=[2000, 1000],
-    #                             sigmas=[1.0, 0.0],
-    #                             factors=[2, 1])
-    #
-    # transform = AffineTransform3D()
-    # params0 = None
-    # starting_affine = rigid.affine
-    #
-    # affine = affreg.optimize(subvol_a.data, subvol_b.data, transform, params0,
-    #                          subvol_a.grid_to_world, subvol_b.grid_to_world,
-    #                          starting_affine=starting_affine)
-    #
-    # logger.debug('Registration affine: ' + str(affine))
-
-    vol_b.world_transform = np.array(rigid.affine)
+    # TODO: Do something more clever
+    if axis == 0:
+        vol_b.world_transform[1:3, 1:3] = affine.affine[:2, :2]
+        vol_b.world_transform[1:3, 3] = affine.affine[:2, 2]
+    elif axis == 1:
+        vol_b.world_transform[0, 0] = affine.affine[0, 0]
+        vol_b.world_transform[2, 0] = affine.affine[1, 0]
+        vol_b.world_transform[0, 2] = affine.affine[0, 1]
+        vol_b.world_transform[2, 2] = affine.affine[1, 1]
+    elif axis == 2:
+        vol_b.world_transform[:2, :2] = affine.affine[:2, :2]
+        vol_b.world_transform[:2, 3] = affine.affine[:2, 2]
 
     return vol_a, vol_b
 
 
-def make_isotropic(vol_a: Volume, vol_b: Volume):
-    import scipy.interpolate
-    min_res = min(np.min(vol_a.spacing), np.min(vol_b.spacing))
-    # zoomed_volA = scipy.interpolate.interp1d(ax, vol_a.data, axis=2)(np.linspace(0, len(ax)-1, len(ax)*(vol_a.resolution[2]/vol_b.resolution[2]))).astype(np.uint16)
-    zoomed_volA = scipy.ndimage.zoom(vol_a.data, vol_a.spacing / min_res, order=1)
-    # zoomed_volB = scipy.interpolate.interp1d(bx, vol_b.data, axis=1)(np.linspace(0, len(bx)-1, len(bx)*(vol_b.resolution[1]/vol_a.resolution[1]))).astype(np.uint16)
-    zoomed_volB = scipy.ndimage.zoom(vol_b.data, vol_b.spacing / min_res, order=1)
+def register_com(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
+    from dipy.align.imaffine import transform_centers_of_mass
 
-    result_vol_a = vol_a.update(zoomed_volA,
-                                spacing=(min_res,) * 3)
-    result_vol_b = vol_b.update(zoomed_volB,
-                                spacing=(min_res,) * 3)
+    affine = transform_centers_of_mass(vol_a, vol_a.grid_to_world, vol_b, vol_b.grid_to_world)
 
-    return result_vol_a, result_vol_b
+    vol_b.world_transform[:] = np.array(affine.affine)
+    return vol_a, vol_b
 
 
-def fuse(vol_a: Volume, vol_b: Volume):
-    # FIXME: Do something clever with is_skewed
-    return Volume(np.floor_divide(vol_a.data + vol_b.data, 2).astype(np.uint16), False, vol_a.spacing, is_skewed=False)
+def register_dipy(vol_a: Volume, vol_b: Volume,
+                  sampling_prop: float = 1.0, crop: float = 0.8, transform_cls: type = TranslationTransform3D) -> Tuple[
+    Volume, Volume]:
+    from dipy.align.imaffine import (MutualInformationMetric,
+                                     AffineRegistration)
 
+    from dispim.util import crop_view
+    from dispim.metrics import MUTUAL_INFORMATION_METRIC, MUTUAL_INFORMATION_GRADIENT_METRIC
 
-def deconvolve_rl(vol: Volume, n: int, blur: BlurFunction) -> Volume:
-    # TODO: Possibly switch this to use the skimage function (blur function must then be converted to PSF first)
-    estimate = vol.data
-    with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
-        for _ in bar(range(n)):
-            estimate = estimate * blur(vol.data / (blur(estimate) + 1E-9))
+    logger.debug('Sampling prop: ' + str(sampling_prop))
+    logger.debug('Crop: ' + str(crop))
 
-    CURSOR_UP_ONE = '\x1b[1A'
-    ERASE_LINE = '\x1b[2K'
-    print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
+    subvol_a = crop_view(vol_a, crop, center_crop=False)
+    subvol_b = crop_view(vol_b, crop, center_crop=False)
 
-    est_min = np.min(estimate)
-    est_max = np.max(estimate)
+    logger.debug('Sub-volume A size: ' + str(subvol_a.shape))
+    logger.debug('Sub-volume B size: ' + str(subvol_b.shape))
 
-    return Volume(np.clip((estimate + est_min) / (est_max - est_min), 0.0, 1.0), False, vol.spacing, is_skewed=False)
+    level_iters = [10000, 1000, 500]
 
+    sigmas = [3.0, 1.0, 0.0]
 
-def deconvolve(vol_a: Volume, vol_b: Volume, n: int, blurA: BlurFunction, blurB: BlurFunction) -> Volume:
-    view_a, view_b = vol_a.data, vol_b.data
+    factors = [2, 1, 1]
 
-    estimate = (view_a + view_b) / 2
-    with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
-        for _ in bar(range(n)):
-            estimate_A = estimate * blurA(view_a / (blurA(estimate) + 1E-9))
-            estimate = estimate_A * blurB(view_b / (blurB(estimate_A) + 1E-9))
-
-    CURSOR_UP_ONE = '\x1b[1A'
-    ERASE_LINE = '\x1b[2K'
-    print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
-
-    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
-
-
-def density_to_multiview_data(density, psf_A, psf_B, out=None):
-    from scipy.signal import fftconvolve
-    """
-    Takes a 2D image input, returns a stack of multiview data
-    """
-    if out is None:
-        multiview_data = np.zeros(
-            (2,) + density.shape, dtype=np.uint16)
+    if metrack.is_tracked(MUTUAL_INFORMATION_METRIC) or metrack.is_tracked(MUTUAL_INFORMATION_GRADIENT_METRIC):
+        def callback(value: float, gradient: float):
+            metrack.append_metric(MUTUAL_INFORMATION_METRIC, (None, value))
+            metrack.append_metric(MUTUAL_INFORMATION_GRADIENT_METRIC, (None, gradient))
     else:
-        multiview_data = out
+        callback = None
 
-    """
-    Simulate the imaging process by applying multiple blurs
-    """
-    multiview_data[0, :, :, :] = fftconvolve(density, psf_A, 'same')
-    multiview_data[1, :, :, :] = fftconvolve(density, psf_B, 'same')
-    return multiview_data
+    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop, sampling_type='random'),
+                                level_iters=level_iters,
+                                sigmas=sigmas,
+                                factors=factors)
 
+    transform = transform_cls()
+    params0 = None
 
-def multiview_data_to_density(multiview_data, psf_A, psf_B, out=None):
-    from scipy.signal import fftconvolve
-    """
-    The transpose of the density_to_multiview_data operation we perform above.
-    """
-    if out is None:
-        density = np.zeros(multiview_data.shape[2:], dtype=np.uint16)
-    else:
-        density = out
-        density.fill(0)
+    starting_affine = vol_b.world_transform
+    affine = affreg.optimize(subvol_a, subvol_b, transform, params0,
+                             subvol_a.grid_to_world, subvol_b.grid_to_world,
+                             starting_affine=starting_affine)
 
-    np.add(density, fftconvolve(multiview_data[0, :, :, :], psf_A, 'same') / 2, out=density, casting='unsafe')
-    np.add(density, fftconvolve(multiview_data[1, :, :, :], psf_B, 'same') / 2, out=density, casting='unsafe')
-    return density
+    logger.debug('Registration transform: ' + str(transform))
+
+    vol_b = Volume(vol_b, world_transform=np.array(affine.affine))
+
+    return vol_a, vol_b
 
 
-def fft_centered(arr, newshape):
-    # Return the center newshape portion of the array.
-    newshape = np.asarray(newshape)
-    currshape = np.array(arr.shape)
-    startind = (currshape - newshape) // 2
-    endind = startind + newshape
-    myslice = [slice(startind[k], endind[k]) for k in range(len(endind))]
-    return arr[tuple(myslice)]
-
-
-import arrayfire as af
-
-
-def rfft_af(x, s=None, axes=None):
-    if s is None:
-        s = x.shape
-
-    x_d = af.from_ndarray(x)
-    r_d = af.fft3_r2c(x_d, *s)
-    del x_d
-    r = r_d.to_ndarray()
-    del r_d
-    return r
-
-
-def irfft_af(x, s, axes=None):
-    x_d = af.from_ndarray(x)
-    r_d = af.fft3_c2r(x_d)
-    del x_d
-    r = r_d.to_ndarray()
-    del r_d
-    return r
-
-
-def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
+def deconvolve(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_b: np.ndarray) -> Volume:
     # from astropy.convolution import convolve_fft
     from functools import partial
     from scipy.signal import fftconvolve
-    # FIXME: "Most (all?) FFT packages only work well (performance-wise) with sizes that do not have any large prime
-    # FIXME: factors. Rounding the signal and kernel size up to the next power of two is a common practice that may
-    # FIXME; result in a (very) significant speed-up." (
-    # FIXME: https://stackoverflow.com/questions/18384054/what-are-the-downsides-of
-    # FIXME: -convolution-by-fft-compared-to-realspace-convolution)
-    view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
+    view_a, view_b = vol_a.astype(np.float), vol_b.astype(np.float)
 
-    psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
-    psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
-    psf_Ai = psf_A[::-1, ::-1, ::-1]
-    psf_Bi = psf_B[::-1, ::-1, ::-1]
+    psf_a = psf_a.astype(np.float) / np.sum(psf_a).astype(np.float)
+    psf_b = psf_b.astype(np.float) / np.sum(psf_b).astype(np.float)
+    psf_Ai = psf_a[::-1, ::-1, ::-1]
+    psf_Bi = psf_b[::-1, ::-1, ::-1]
 
     estimate = (view_a + view_b) / 2
 
-    # convolve = partial(convolve_fft,
-    #                    fftn=partial(pyfftw.interfaces.numpy_fft.rfftn, threads=40),
-    #                    ifftn=partial(pyfftw.interfaces.numpy_fft.irfftn, threads=40),
-    #                    allow_huge=True)
     convolve = partial(fftconvolve, mode='same')
 
     with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
         for _ in bar(range(n)):
-            estimate = estimate * convolve(view_a / (convolve(estimate, psf_A) + 1e-6), psf_Ai)
-            estimate = estimate * convolve(view_b / (convolve(estimate, psf_B) + 1e-6), psf_Bi)
+            estimate = estimate * convolve(view_a / (convolve(estimate, psf_a) + 1e-6), psf_Ai)
+            estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 1e-6), psf_Bi)
 
     CURSOR_UP_ONE = '\x1b[1A'
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
 
     # TODO: Rescaling might be unwanted
-    e_min, e_max = np.percentile(estimate, [0.001, 99.999])
+    e_min, e_max = np.percentile(estimate, [0.05, 99.95])
     estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
 
-    # estimate = np.clip(estimate, 0, 2**16-1).astype(np.uint16)
+    return Volume(estimate, inverted=False, spacing=vol_a.spacing, is_skewed=False)
 
-    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
 
-def deconvolve_gpu_chunked(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B, nchunks: int):
-    result = np.zeros_like(vol_a.data)
+def deconvolve_gpu_chunked(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_b: np.ndarray, nchunks: int,
+                           blind: bool = False) -> Volume:
+    import arrayfire as af
+    result = np.zeros(vol_a.shape, np.float32)
     chunk_size = vol_a.shape[2] // nchunks
     for i in range(nchunks):
         start = i * chunk_size
-        end = (i+1) * chunk_size if i < nchunks-1 else vol_a.shape[2]
-        chunk_est = deconvolve_gpu(Volume(vol_a.data[:, :, start:end], False, (1, 1, 1)), Volume(vol_b.data[:, :, start:end], False, (1, 1, 1)), n, psf_A, psf_B)
+        end = (i + 1) * chunk_size if i < nchunks - 1 else vol_a.shape[2]
+        lpad = int(psf_a.shape[2]*3.7) if i > 0 else 0
+        rpad = int(psf_a.shape[2]*3.7) if i < nchunks - 1 else 0
+        with metrack.Context(f'Chunk {i}'):
+            if not blind:
+                chunk_est = deconvolve_gpu(Volume(vol_a[:, :, start-lpad:end+rpad], False, (1, 1, 1)),
+                                           Volume(vol_b[:, :, start-lpad:end+rpad], False, (1, 1, 1)), n, psf_a, psf_b)
+            else:
+                chunk_est = deconvolve_gpu_blind(Volume(vol_a[:, :, start-lpad:end+rpad], False, (1, 1, 1)),
+                                                 Volume(vol_b[:, :, start-lpad:end+rpad], False, (1, 1, 1)), n, 5, psf_a, psf_b)
 
-        result[:, :, start:end] = chunk_est.data
+        af.device_gc()
 
-    return Volume(result, False, (1, 1, 1))
+        if rpad > 0:
+            result[:, :, start:end] = chunk_est[:, :, lpad:-rpad]
+        else:
+            result[:, :, start:end] = chunk_est[:, :, lpad:]
+
+    e_min, e_max = np.percentile(result, [0.002, 99.998])
+    result = ((np.clip(result, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
+
+    return Volume(result, inverted=False, spacing=(1, 1, 1))
 
 
-def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
-    # from astropy.convolution import convolve_fft
+def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_b: np.ndarray) -> Volume:
     from functools import partial
+    from dispim.metrics import DECONV_MSE_DELTA
     import arrayfire as af
-    view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
 
-    psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
-    psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
-    psf_Ai = psf_A[::-1, ::-1, ::-1]
-    psf_Bi = psf_B[::-1, ::-1, ::-1]
+    view_a, view_b = vol_a.astype(np.float), vol_b.astype(np.float)
+
+    psf_a = psf_a.astype(np.float) / np.sum(psf_a).astype(np.float)
+    psf_b = psf_b.astype(np.float) / np.sum(psf_b).astype(np.float)
+    psf_Ai = psf_a[::-1, ::-1, ::-1]
+    psf_Bi = psf_b[::-1, ::-1, ::-1]
 
     view_a = af.cast(af.from_ndarray(view_a), af.Dtype.f32)
     view_b = af.cast(af.from_ndarray(view_b), af.Dtype.f32)
 
-    psf_A = af.cast(af.from_ndarray(psf_A), af.Dtype.f32)
-    psf_B = af.cast(af.from_ndarray(psf_B), af.Dtype.f32)
+    psf_a = af.cast(af.from_ndarray(psf_a), af.Dtype.f32)
+    psf_b = af.cast(af.from_ndarray(psf_b), af.Dtype.f32)
     psf_Ai = af.cast(af.from_ndarray(psf_Ai), af.Dtype.f32)
     psf_Bi = af.cast(af.from_ndarray(psf_Bi), af.Dtype.f32)
 
     estimate = (view_a + view_b) / 2
 
-    # convolve = partial(convolve_fft,
-    #                    fftn=partial(pyfftw.interfaces.numpy_fft.rfftn, threads=40),
-    #                    ifftn=partial(pyfftw.interfaces.numpy_fft.irfftn, threads=40),
-    #                    allow_huge=True)
     convolve = partial(af.fft_convolve3)
 
     with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
         for _ in bar(range(n)):
-            estimate = estimate * convolve(view_a / (convolve(estimate, psf_A) + 1e-6), psf_Ai)
-            estimate = estimate * convolve(view_b / (convolve(estimate, psf_B) + 1e-6), psf_Bi)
+            if metrack.is_tracked(DECONV_MSE_DELTA):
+                prev = estimate
+            estimate = estimate * convolve(view_a / (convolve(estimate, psf_a) + 10), psf_Ai)
+            estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 10), psf_Bi)
+
+            if metrack.is_tracked(DECONV_MSE_DELTA):
+                metrack.append_metric(DECONV_MSE_DELTA, (_, float(np.mean((prev-estimate)**2))))
 
     CURSOR_UP_ONE = '\x1b[1A'
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
 
-    # TODO: Rescaling might be unwanted
-    e_min, e_max = np.percentile(estimate, [0.001, 99.999])
-    estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
-
-    # estimate = np.clip(estimate, 0, 2**16-1).astype(np.uint16)
-
-    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
+    return Volume(estimate.to_ndarray(), inverted=False, spacing=vol_a.spacing, is_skewed=False)
 
 
-def deconvolve_matlab(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
-    import matlab.engine
-    view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
+def deconvolve_gpu_blind(vol_a: Volume, vol_b: Volume, n: int, m: int, psf_a: np.ndarray, psf_b: np.ndarray) -> Volume:
+    from functools import partial
+    import arrayfire as af
+    view_a, view_b = vol_a.astype(np.float), vol_b.astype(np.float)
 
-    psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
-    psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
+    psf_a = psf_a.astype(np.float) / np.sum(psf_a).astype(np.float)
+    psf_b = psf_b.astype(np.float) / np.sum(psf_b).astype(np.float)
+    padding = tuple((int(s // 2 - psf_a.shape[i]), int((s - s // 2) - psf_a.shape[i])) for i, s in enumerate(view_a.shape))
+    print(psf_a.shape)
+    print(psf_b.shape)
+    psf_a = np.pad(psf_a,
+                   tuple(((s - psf_a.shape[i])//2, (s - psf_a.shape[i]) - (s - psf_a.shape[i])//2) for i, s in enumerate(view_a.shape)), 'constant')
+    print(psf_b.shape)
+    psf_b = np.pad(psf_b,
+                   tuple(((s - psf_b.shape[i])//2, (s - psf_b.shape[i]) - (s - psf_b.shape[i])//2) for i, s in enumerate(view_b.shape)), 'constant')
+    print(psf_a.shape, view_a.shape)
+    print(psf_b.shape, view_b.shape)
+    # psf_Ai = psf_a[::-1, ::-1, ::-1]
+    # psf_Bi = psf_b[::-1, ::-1, ::-1]
 
-    eng = matlab.engine.start_matlab()
+    view_a = af.cast(af.from_ndarray(view_a), af.Dtype.u16)
+    view_b = af.cast(af.from_ndarray(view_b), af.Dtype.u16)
 
-    estimate = eng.jrl(matlab.double(view_a.tolist()), matlab.double(view_b.tolist()), matlab.double(psf_A.tolist()),
-                       matlab.double(psf_B.tolist()), n)
-    estimate = estimate - np.zeros_like(view_a)
-
-    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
-
-
-# def deconvolve_psf(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
-#     from scipy.signal import fftconvolve
-#     from scipy import fftpack
-#     # FIXME: "Most (all?) FFT packages only work well (performance-wise) with sizes that do not have any large prime
-#     # FIXME: factors. Rounding the signal and kernel size up to the next power of two is a common practice that may
-#     # FIXME; result in a (very) significant speed-up." (
-#     # FIXME: https://stackoverflow.com/questions/18384054/what-are-the-downsides-of
-#     # FIXME: -convolution-by-fft-compared-to-realspace-convolution)
-#     view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
-#
-#     psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
-#     psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
-#     psf_Ai = psf_A[::-1, ::-1, ::-1]
-#     psf_Bi = psf_B[::-1, ::-1, ::-1]
-#
-#     estimate = (view_a + view_b) / 2
-#
-#     s1 = np.array(view_a.shape)
-#     s2 = np.array(psf_A.shape)
-#
-#     shape = s1 + s2 - 1
-#
-#     fshape = [fftpack.helper.next_fast_len(int(d)) for d in shape]
-#     fslice = tuple([slice(0, int(sz)) for sz in shape])
-#     psf_A_fft = np.fft.rfftn(psf_A, fshape)
-#     psf_B_fft = np.fft.rfftn(psf_B, fshape)
-#     psf_Ai_fft = np.fft.rfftn(psf_Ai, fshape)
-#     psf_Bi_fft = np.fft.rfftn(psf_Bi, fshape)
-#
-#     if debug:
-#         last = estimate
-#         debug_f = open('convolve_debug.txt', 'w')
-#
-#     with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
-#         for _ in bar(range(n)):
-#             # TODO: Maybe fix the dtype of estimate during the deconvolution to save memory
-#             # print((view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7)).min())
-#             # print((view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7)).max())
-#             # amax = (fftconvolve(estimate, psf_A, mode='same') + 1e-7).argmin()
-#             # print(estimate.flatten()[amax])
-#             # print(estimate.flatten()[amax]/(fftconvolve(estimate, psf_A, mode='same') + 1e-7).min())
-#             # print(((fftconvolve(estimate, psf_A, mode='same') + 1e-7)).min())
-#             # print(((fftconvolve(estimate, psf_A, mode='same') + 1e-7)).max())
-#             # print(estimate.max())
-#             # print(estimate.min())
-#             # estimate = estimate * fftconvolve(view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7), psf_Ai,
-#             #                                   mode='same')
-#             #
-#             # estimate = estimate * fftconvolve(view_b / (fftconvolve(estimate, psf_B, mode='same') + 1e-7), psf_Bi,
-#             #                                   mode='same')
-#
-#             blurA = view_a / (fft_centered(np.fft.irfftn(np.fft.rfftn(estimate, fshape) * psf_A_fft, fshape)[fslice],
-#                                            s1) + 1e-4)
-#             estimate = estimate * fft_centered(np.fft.irfftn(np.fft.rfftn(blurA, fshape) * psf_Ai_fft, fshape)[fslice],
-#                                                s1)
-#
-#             blurB = view_b / (fft_centered(np.fft.irfftn(np.fft.rfftn(estimate, fshape) * psf_B_fft, fshape)[fslice],
-#                                            s1) + 1e-4)
-#             estimate = estimate * fft_centered(np.fft.irfftn(np.fft.rfftn(blurB, fshape) * psf_Bi_fft, fshape)[fslice],
-#                                                s1)
-#
-#             # print(np.percentile(estimate, (99, 99.5, 99.8, 99.9)))
-#             # print(np.sum(np.abs(estimate-estimate_A)))
-#             if debug:
-#                 diff = np.mean(np.abs(estimate.astype(np.float) - last.astype(np.float)))
-#                 debug_f.write(str(diff) + '\n')
-#                 last = estimate
-#             # density_to_multiview_data(estimate, psf_A, psf_B, out=expected_data)
-#             # #     multiview_data_to_visualization(expected_data, outfile='expected_data.tif')
-#             # "Done constructing."
-#             # """
-#             # Take the ratio between the measured data and the expected data.
-#             # Store this ratio in 'expected_data'
-#             # """
-#             # expected_data += 1e-6  # Don't want to divide by 0!
-#             # np.divide(mvd, expected_data, out=expected_data)
-#             # """
-#             # Apply the transpose of the expected data operation to the correction factor
-#             # """
-#             # multiview_data_to_density(expected_data, psf_A, psf_B, out=correction_factor)
-#             # """
-#             # Multiply the old estimate by the correction factor to get the new estimate
-#             # """
-#             # np.multiply(estimate, correction_factor, out=estimate)
-#
-#     CURSOR_UP_ONE = '\x1b[1A'
-#     ERASE_LINE = '\x1b[2K'
-#     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
-#
-#     if debug:
-#         debug_f.close()
-#
-#     # TODO: Rescaling might be unwanted
-#     e_min, e_max = np.percentile(estimate, [0.001, 99.999])
-#     estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
-#
-#     # estimate = np.clip(estimate, 0, 2**16-1).astype(np.uint16)
-#
-#     return Volume(estimate, False, vol_a.spacing, is_skewed=False)
-
-
-def deconvolve_fast(vol_a, vol_b, n, psf_A, psf_B):
-    r = deconvolve_fast_numba(vol_a.data.astype(np.float), vol_b.data.astype(np.float), n, psf_A.astype(np.float),
-                              psf_B.astype(np.float))
-
-    return Volume(r, False, vol_a.spacing, is_skewed=False)
-
-
-from numpy.fft import fftn, ifftn
-
-
-@jit(parallel=True)
-def deconvolve_fast_numba(view_a: np.ndarray, view_b: np.ndarray, n: int, psf_A, psf_B) -> np.ndarray:
-    psf_A = psf_A / np.sum(psf_A)
-    psf_B = psf_B / np.sum(psf_B)
-    psf_Ai = psf_A[::-1, ::-1, ::-1]
-    psf_Bi = psf_B[::-1, ::-1, ::-1]
-
-    psf_A_fft = fftn(psf_A, view_a.shape)
-    psf_B_fft = fftn(psf_B, view_a.shape)
-    psf_Ai_fft = fftn(psf_Ai, view_a.shape)
-    psf_Bi_fft = fftn(psf_Bi, view_a.shape)
+    psf_a = af.cast(af.from_ndarray(psf_a), af.Dtype.f32)
+    psf_b = af.cast(af.from_ndarray(psf_b), af.Dtype.f32)
+    # psf_Ai = af.cast(af.from_ndarray(psf_Ai), af.Dtype.f32)
+    # psf_Bi = af.cast(af.from_ndarray(psf_Bi), af.Dtype.f32)
 
     estimate = (view_a + view_b) / 2
 
-    for _ in (range(n)):
-        estimate = estimate * ifftn(fftn(view_a / (ifftn(fftn(estimate) * psf_A_fft) + 1e-7)) * psf_Ai_fft)
-        estimate = estimate * ifftn(fftn(view_b / (ifftn(fftn(estimate) * psf_B_fft) + 1e-7)) * psf_Bi_fft)
+    convolve = partial(af.fft_convolve3)
 
-        print(_)
+    print('hey')
 
-    # TODO: Rescaling might be unwanted
-    e_min, e_max = np.percentile(estimate, [0.001, 99.999])
-    estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
-
-    return estimate
-
-
-def gpu_fftconvolve(x, y):
-    import reikna.cluda as cluda
-    from reikna.fft import FFT
-
-    api = cluda.any_api()
-    thr = api.Thread.create(device_filters={'include_devices': 'amd'})
-
-    x_dev = thr.to_device(x.astype(np.complex))
-    y_dev = thr.to_device(y.astype(np.complex))
-
-    fft = FFT(x_dev)
-    fftc = fft.compile(thr)
-
-    x_fft_dev = thr.empty_like(x_dev)
-    y_fft_dev = thr.empty_like(y_dev)
-
-    fftc(x_fft_dev, x_dev)
-    fftc(y_fft_dev, y_dev)
-
-    result_fft = x_fft_dev * y_fft_dev
-
-    result = thr.empty_like(result_fft)
-    fftc(result, result_fft, inverse=True)
-
-    result_cpu = thr.from_device(result)
-
-    thr.release()
-
-    return result_cpu
-
-
-def deconvolve_cluda(vol_a: Volume, vol_b: Volume, n: int, psf_A, psf_B) -> Volume:
-    import reikna.cluda as cluda
-    from reikna.fft import FFT
-    view_a, view_b = vol_a.data.astype(np.float), vol_b.data.astype(np.float)
-
-    psf_A = psf_A.astype(np.float) / np.sum(psf_A).astype(np.float)
-    psf_B = psf_B.astype(np.float) / np.sum(psf_B).astype(np.float)
-    psf_Ai = psf_A[::-1, ::-1, ::-1]
-    psf_Bi = psf_B[::-1, ::-1, ::-1]
-
-    print(np.sum(psf_A))
-    print(np.sum(psf_B))
-
-    print(psf_A.dtype)
-
-    mvd = np.zeros((2,) + vol_a.shape)
-    mvd[0, :, :, :] = vol_a.data
-    mvd[1, :, :, :] = vol_b.data
-
-    api = cluda.any_api()
-    thr = api.Thread.create(interactive=True)
-    a_dev = thr.to_device(np.ascontiguousarray(view_a.astype(np.complex64)))
-    b_dev = thr.to_device(np.ascontiguousarray(view_b.astype(np.complex64)))
-
-    psfa_dev = thr.to_device(np.fft.fftn(psf_A, a_dev.shape))
-    psfb_dev = thr.to_device(np.fft.fftn(psf_B, a_dev.shape))
-    psfai_dev = thr.to_device(np.fft.fftn(psf_Ai, a_dev.shape))
-    psfbi_dev = thr.to_device(np.fft.fftn(psf_Bi, a_dev.shape))
-
-    estimate = (a_dev + b_dev) / 2
-
-    compfft = FFT(estimate)
-    compfftc = compfft.compile(thr)
-
-    temp = thr.empty_like(estimate)
-
-    if debug:
-        last = estimate
-        debug_f = open('convolve_debug.txt', 'w')
+    lamb = 0.002
 
     with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
         for _ in bar(range(n)):
-            # temp = TemporaryManager.array(estimate.shape. estimate.dype)
-            compfftc(temp, estimate)
-            temp = temp * psfa_dev
-            compfftc(temp, temp, inverse=True)
-            temp = a_dev / temp
-            compfftc(temp, temp)
-            temp = temp * psfai_dev
-            compfftc(temp, temp, inverse=True)
-            estimate = estimate * temp
+            for j in range(m):
+                psf_a = psf_a * convolve(view_a / (convolve(psf_a, estimate) + 1e-1), estimate[::-1, ::-1, ::-1])
+            for j in range(m):
+                estimate = estimate * convolve(view_a / (convolve(estimate, psf_a) + 10), psf_a[::-1, ::-1, ::-1])
+            for j in range(m):
+                psf_b = psf_b * convolve(view_b / (convolve(psf_b, estimate) + 1e-1), estimate[::-1, ::-1, ::-1])
+            for j in range(m):
+                estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 10), psf_b[::-1, ::-1, ::-1])
 
-            compfftc(temp, estimate)
-            temp = temp * psfb_dev
-            compfftc(temp, temp, inverse=True)
-            temp = b_dev / temp
-            compfftc(temp, temp)
-            temp = temp * psfbi_dev
-            compfftc(temp, temp, inverse=True)
-            estimate = estimate * temp
-            # estimate = estimate * compfftc(temp,
-            #                                compfftc(temp, b_dev / compfftc(temp, compfftc(temp, estimate) * psfb_dev,
-            #                                                                inverse=True)) * psfbi_dev, inverse=True)
-            # estimate = estimate * compfftc(view_a / (fftconvolve(estimate, psf_A, mode='same') + 1e-7), psf_Ai, mode='same')
-
-            # estimate = estimate * compfftc(view_b / (compfftc(estimate, psf_B, mode='same') + 1e-7), psf_Bi, mode='same')
-
-            if debug:
-                diff = np.mean(np.abs(thr.to_device(estimate).astype(np.float) - last.astype(np.float)))
-                debug_f.write(str(diff) + '\n')
-                last = estimate
+    del psf_a, psf_b, view_a, view_b
 
     CURSOR_UP_ONE = '\x1b[1A'
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
 
-    if debug:
-        debug_f.close()
-
-    # TODO: Rescaling might be unwanted
-    estimate = thr.from_device(estimate).astype(np.float)
-    e_min, e_max = np.percentile(estimate, [0.001, 99.999])
-    estimate = ((np.clip(estimate, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
-
-    # estimate = np.clip(estimate, 0, 2**16-1).astype(np.uint16)
-
-    return Volume(estimate, False, vol_a.spacing, is_skewed=False)
+    return Volume(estimate.to_ndarray(), inverted=False, spacing=vol_a.spacing, is_skewed=False)
 
 
-def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, crop: float = 1.0, psf_half_width: int = 7):
+def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_width: int = 7) -> np.ndarray:
     from skimage.filters import threshold_otsu
     from skimage.measure import label, regionprops
-    data = vol.data
+    from dispim.util import extract_3d
+    from dispim.metrics import PSF_SIGMA_XY, PSF_SIGMA_Z
+    data = vol
     thr = threshold_otsu(data)
     data_bin = data > thr
 
     points = [np.array(r.centroid, dtype=np.int) for r in regionprops(label(data_bin))
               if min_size <= r.area <= max_size]
 
+    logger.debug(f'Found {len(points)} objects')
+
+    # points = np.random.choice(points, size=min(len(points), 12000), replace=False)
+    points = points[np.random.choice(len(points), min(len(points), 12000), replace=False), :]
+
     blob_images = []
     for point in points:
         blob_images.append(extract_3d(data, point, psf_half_width))
 
-    median_blob = np.median(blob_images, axis=0)
-    print(median_blob.mean())
-    print(median_blob.max())
-    print(np.median(median_blob))
-    print(len(points))
+        if metrack.is_tracked(PSF_SIGMA_XY) or metrack.is_tracked(PSF_SIGMA_Z):
+            height, center_x, center_y, width_x, width_y, rotation = fitgaussian(blob_images[-1][psf_half_width, :, :])
+            scale = vol.shape[0]
+            if width_x > width_y:
+                metrack.append_metric(PSF_SIGMA_Z, (None, width_x*scale))
+                metrack.append_metric(PSF_SIGMA_XY, (None, width_y*scale))
+            else:
+                metrack.append_metric(PSF_SIGMA_Z, (None, width_y*scale))
+                metrack.append_metric(PSF_SIGMA_XY, (None, width_x*scale))
 
-    try:
-        import tifffile
-        tifffile.imsave('psf' + str(np.random.rand()), median_blob)
-    except PermissionError:
-        pass
+    median_blob = np.median(blob_images, axis=0)
 
     return median_blob
 
+def gaussian(height, center_x, center_y, width_x, width_y, rotation):
+    """Returns a gaussian function with the given parameters"""
+    width_x = float(width_x)
+    width_y = float(width_y)
 
-def load_volumes(paths: List[str], spacing: Tuple[float, float, float], scale: float = None, is_skewed: bool = True):
-    # FIXME: Only support loading a single volume or single volume pair
-    from tifffile import imread
-    import gc
+    rotation = np.deg2rad(rotation)
+    center_x = center_x * np.cos(rotation) - center_y * np.sin(rotation)
+    center_y = center_x * np.sin(rotation) + center_y * np.cos(rotation)
 
-    datas = []
-    for path in paths:
-        logger.info("Loading volume from {}".format(path))
-        data = imread(path)
+    def rotgauss(x, y):
+        xp = x * np.cos(rotation) - y * np.sin(rotation)
+        yp = x * np.sin(rotation) + y * np.cos(rotation)
+        g = height * np.exp(
+            -(((center_x - xp) / width_x) ** 2 +
+              ((center_y - yp) / width_y) ** 2) / 2.)
+        return g
 
-        logger.info("Initial volume shape: {}".format(data.shape))
+    return rotgauss
 
-        if len(data.shape) > 3:
-            if scale is not None:
-                data_a = scipy.ndimage.zoom(data[:, 0, :, :], scale, order=1)
-                data_b = scipy.ndimage.zoom(data[:, 1, :, :], scale, order=1)
+def moments(data):
+    """Returns (height, x, y, width_x, width_y)
+    the gaussian parameters of a 2D distribution by calculating its
+    moments """
+    total = data.sum()
+    X, Y = np.indices(data.shape)
+    x = (X * data).sum() / total
+    y = (Y * data).sum() / total
+    col = data[:, int(y)]
+    width_x = np.sqrt(abs((np.arange(col.size) - y) ** 2 * col).sum() / col.sum())
+    row = data[int(x), :]
+    width_y = np.sqrt(abs((np.arange(row.size) - x) ** 2 * row).sum() / row.sum())
+    height = data.max()
+    return height, x, y, width_x, width_y, 0.0
 
-                datas.append(data_a)
-                datas.append(data_b)
-            else:
-                datas.append(data[:, 0, :, :])
-                datas.append(data[:, 1, :, :])
-        else:
-            if scale is not None:
-                data = scipy.ndimage.zoom(data, scale, order=1)
-            datas.append(data)
+def fitgaussian(data):
+    import scipy.optimize
+    """Returns (height, x, y, width_x, width_y)
+    the gaussian parameters of a 2D distribution found by a fit"""
+    params = moments(data)
+    errorfunction = lambda p: np.ravel(gaussian(*p)(*np.indices(data.shape)) - data)
+    p, success = scipy.optimize.leastsq(errorfunction, params)
+    return p
 
-        logger.debug("Final volume shape: {}".format(data.shape))
-        del data
-        gc.collect()
+def apply_registration(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
+    from scipy.ndimage import affine_transform
+    min_res = min(np.min(vol_a.spacing), np.min(vol_b.spacing))
 
-    volumes = []
+    logger.debug(f"Min res: {min_res}")
+    logger.debug(f"Grid-to-world A:\n{vol_a.grid_to_world}")
+    logger.debug(f"Grid-to-world B:\n{vol_b.grid_to_world}")
+    logger.debug(f"World transform:\n{vol_b.world_transform}")
 
-    print(datas[0].nbytes)
-    print(datas[0].dtype)
-    print(datas[0].max())
+    grid_to_world_final = np.eye(4) * np.array([min_res, min_res, min_res, 1])
 
-    # TODO: Handle different data types (aside from uint16)
+    transform_a = np.linalg.inv(vol_a.grid_to_world)
+    transform_a = transform_a @ grid_to_world_final
 
-    # TODO: Make this different
-    from hashlib import sha1
+    logger.debug(f'Final A transform:\n{transform_a}')
 
-    for i in range(len(datas)):
-        # TODO: Handle loading n volumes properly or don't handle them at all
-        volumes.append(Volume(datas[i].swapaxes(0, 2).swapaxes(0, 1), bool(i), spacing, is_skewed=is_skewed))
-        logger.debug(volumes[-1].data.mean())
-        logger.debug(hash(volumes[-1].data.tostring()))
-        gc.collect()
+    final_shape = (np.ceil(
+        np.linalg.inv(transform_a) @ np.array([vol_a.shape[0], vol_a.shape[1], vol_a.shape[2], 1]))).astype(
+        np.int)[:3]
 
-    return tuple(volumes)
+    vol_a = Volume(affine_transform(vol_a, transform_a, output_shape=final_shape, order=2),
+                   spacing=(min_res, min_res, min_res), is_skewed=False, inverted=False)
 
+    transform_b = np.linalg.inv(vol_b.grid_to_world)
+    transform_b = transform_b @ vol_b.world_transform
+    transform_b = transform_b @ grid_to_world_final
 
-def deconvolve_diag(vol_a: Volume, vol_b: Volume, n: int, sigma_z: float, sigma_xy: float) -> Volume:
-    from scipy.signal import fftconvolve
-    # FIXME?: "Most (all?) FFT packages only work well (performance-wise) with sizes that do not have any large prime
-    # FIXME?: factors. Rounding the signal and kernel size up to the next power of two is a common practice that may result
-    # FIXME?: in a (very) significant speed-up." (https://stackoverflow.com/questions/18384054/what-are-the-downsides-of
-    # FIXME?: -convolution-by-fft-compared-to-realspace-convolution)
-    view_a, view_b = vol_a.data, vol_b.data
-    # view_a = np.clip(
-    #     scipy.ndimage.zoom(view_a, (2, 2, 2)), 0.0, 1.0)
-    # view_b = np.clip(
-    #     scipy.ndimage.zoom(view_b, (2, 2, 2)), 0.0, 1.0)
+    logger.debug(f'Final B transform:\n{transform_b}')
 
-    psf_A = np.zeros((81, 81, 81))
-    psf_A[40, 40, 40] = 1
-    psf_A = scipy.ndimage.gaussian_filter(psf_A, (sigma_xy, sigma_xy, sigma_z))
-    psf_A = scipy.ndimage.rotate(psf_A, -45, axes=(1, 2))
-    psf_A = psf_A[20:-20, 20:-20, 20:-20]
+    transformed = affine_transform(vol_b, transform_b, output_shape=final_shape, order=2)
 
-    psf_B = np.zeros((80, 80, 80))
-    psf_B[40, 40, 40] = 1
-    psf_B = scipy.ndimage.gaussian_filter(psf_B, (sigma_xy, sigma_xy, sigma_z))
-    psf_B = scipy.ndimage.rotate(psf_B, 45, axes=(1, 2))
-    psf_B = psf_B[20:-20, 20:-20, 20:-20]
+    logger.debug(f'Transformed A average value: {np.mean(vol_a)}')
+    logger.debug(f'Transformed B average value: {np.mean(transformed)}')
 
-    psf_Ai = psf_A[::-1, ::-1, ::-1]
-    psf_Bi = psf_B[::-1, ::-1, ::-1]
-
-    estimate = (view_a + view_b) / 2
-    with progressbar.ProgressBar(max_value=n, redirect_stderr=True) as bar:
-        for _ in bar(range(n)):
-            # TODO: Maybe fix the dtype of estimate during the deconvolution to save memory
-            estimate_A = estimate * fftconvolve(view_a / (fftconvolve(estimate, psf_A, mode='same') + 1E-9), psf_Ai,
-                                                mode='same')
-            estimate = estimate_A * fftconvolve(view_b / (fftconvolve(estimate_A, psf_B, mode='same') + 1E-9), psf_Bi,
-                                                mode='same')
-
-    CURSOR_UP_ONE = '\x1b[1A'
-    ERASE_LINE = '\x1b[2K'
-    print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
-
-    estimate = np.clip(estimate, 3, 2 ** 16 - 3).astype(np.uint16)
-
-    return Volume(estimate, False, vol_a.spacing)
-
-
-def extract_3d(data, center, half_size):
-    imax = np.clip(center + half_size + 1, 0, data.shape).astype(np.int)
-    imin = np.clip(center - half_size, 0, data.shape).astype(np.int)
-
-    subvol = data[imin[0]:imax[0], imin[1]:imax[1], imin[2]:imax[2]]
-
-    max_missing = ((center + half_size + 1) - imax).astype(np.int)
-    min_missing = (imin - (center - half_size)).astype(np.int)
-
-    return np.pad(subvol, [(min_missing[i], max_missing[i]) for i in range(3)], mode='constant')
+    return vol_a, Volume(transformed, spacing=vol_a.spacing)

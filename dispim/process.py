@@ -6,6 +6,9 @@ from typing import List, Tuple, Union
 
 import numpy as np
 import scipy.ndimage
+from dipy.align.transforms import (TranslationTransform3D, TranslationTransform2D,
+                                   RigidTransform3D, RigidTransform2D,
+                                   AffineTransform3D, AffineTransform2D)
 
 import dispim
 from dispim import Volume
@@ -60,71 +63,51 @@ class ProcessDeskewDiag(ProcessStep):
             # return dispim.unshift(data[0], self.invert_a),
 
 
-class ProcessRegister(ProcessStep):
-    def __init__(self, sampling_prop: float = 1.0, crop: float = 1.0):
+class ProcessRegisterCom(ProcessStep):
+    def __init__(self):
         super().__init__()
-        self.crop = crop
-        self.sampling_prop = sampling_prop
-        print(sampling_prop)
 
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.register_dipy(data[0], data[1], sampling_prop=self.sampling_prop, crop=self.crop)
+        return dispim.register_com(data[0], data[1])
+
+
+class ProcessRegister(ProcessStep):
+    type_mapping = {
+        'translation': TranslationTransform3D,
+        'rigid': RigidTransform3D,
+        'affine': AffineTransform3D
+    }
+
+    def __init__(self, transform_type: str = 'translation', sampling_prop: float = 1.0, crop: float = 1.0):
+        super().__init__()
+        self.transform_cls = self.type_mapping[transform_type]
+        self.crop = crop
+        self.sampling_prop = sampling_prop
+
+    def process(self, data: ProcessData) -> ProcessData:
+        return dispim.register_dipy(data[0], data[1], sampling_prop=self.sampling_prop, crop=self.crop,
+                                    transform_cls=self.transform_cls)
 
 
 class ProcessRegister2d(ProcessStep):
-    def __init__(self, axis=2):
+    type_mapping = {
+        'translation': TranslationTransform2D,
+        'rigid': RigidTransform2D,
+        'affine': AffineTransform2D
+    }
+
+    def __init__(self, axis=2, transform_type: str = 'translation'):
         super().__init__()
-        self.axis = axis
+        self.axis = int(axis)
+        self.transform_cls = self.type_mapping[transform_type]
 
     def process(self, data: ProcessData):
-        return dispim.register_2d(*data, axis=self.axis)
+        return dispim.register_2d(*data, axis=self.axis, transform_cls=self.transform_cls)
 
 
 class ProcessApplyRegistration(ProcessStep):
     def process(self, data: ProcessData) -> ProcessData:
-        from scipy.ndimage import affine_transform
-        min_res = min(np.min(data[0].spacing), np.min(data[1].spacing))
-        grid_to_world_final = np.eye(4) * np.array([min_res, min_res, min_res, 1])
-        transform_a = np.linalg.inv(data[0].grid_to_world)
-        # data[1].world_transform[1, 3] /= -np.sqrt(2)
-        transform_a = transform_a @ grid_to_world_final
-        final_shape = (np.ceil(
-            np.linalg.inv(transform_a) @ np.array([data[0].shape[0], data[0].shape[1], data[0].shape[2], 1]))).astype(
-            np.int)[:3]
-        print(final_shape)
-        print(data[0].grid_to_world)
-        print(grid_to_world_final)
-        data[0].update(affine_transform(data[0].data, transform_a, output_shape=final_shape),
-                       spacing=(min_res, min_res, min_res), is_skewed=False, inverted=False)
-        print(data[0].data.shape, data[1].data.shape)
-        transform_b = np.linalg.inv(data[1].grid_to_world)
-        # data[1].world_transform[1, 3] /= -np.sqrt(2)
-        transform_b = transform_b @ (data[1].world_transform)
-        transform_b = transform_b @ data[0].grid_to_world
-        # transform[2, 3] = 0
-        print(np.linalg.inv(data[0].grid_to_world))
-        print(data[0].inverted)
-        print(data[1].inverted)
-        print(data[1].world_transform)
-        print(data[1].grid_to_world)
-        print(transform_b)
-        print(data[1].shape)
-        transformed = affine_transform(np.pad(data[1].data, ((0, 0), (0, 0), (0, 0)), mode='constant'), (transform_b),
-                                       output_shape=final_shape)
-        # transformed = transformed[:data[0].shape[0], :data[0].shape[1], :data[0].shape[2]]
-        # transformed = np.pad(transformed, ((0, np.max(data[0].shape[0] - transformed.shape[0], 0)),
-        #                                    (0, np.max(data[0].shape[1] - transformed.shape[1], 0)),
-        #                                    (0, np.max(data[0].shape[2] - transformed.shape[2], 0))),
-        #                      mode='constant', constant_values=0)
-
-        print(transformed.mean())
-
-        return data[0], data[1].copy(transformed, inverted=False, spacing=data[0].spacing, is_skewed=False)
-
-
-class ProcessRegisterSyn(ProcessStep):
-    def process(self, data: ProcessData):
-        return dispim.register_syn(data[0], data[1])
+        return dispim.apply_registration(data[0], data[1])
 
 
 class ProcessFuse(ProcessStep):
@@ -150,7 +133,8 @@ class ProcessBrighten(ProcessStep):
 
     def process(self, data: ProcessData):
         if len(data) == 2:
-            return data[0].update((data[0].data*self.f).astype(np.uint16)), data[1].update((data[1].data*self.f).astype(np.uint16))
+            return data[0].update((data[0].data * self.f).astype(np.uint16)), data[1].update(
+                (data[1].data * self.f).astype(np.uint16))
         else:
             return data[0].update((data[0].data * self.f).astype(np.uint16)),
 
@@ -172,27 +156,24 @@ class ProcessDiscardB(ProcessStep):
 
 
 class ProcessExtractPsf(ProcessStep):
-    def __init__(self, min_size: int = 50, max_size: int = 140, crop: float = 1.0, psf_half_width: int = 5):
+    def __init__(self, min_size: int = 25, max_size: int = 90, psf_half_width: int = 5):
         super().__init__()
-        self.min_size = min_size
-        self.max_size = max_size
-        self.crop = crop
-        self.psf_half_width = psf_half_width
+        self.min_size = int(min_size)
+        self.max_size = int(max_size)
+        self.psf_half_width = int(psf_half_width)
 
     def process(self, data: ProcessData):
-        psf_A = dispim.extract_psf(data[0], self.min_size, self.max_size, self.crop, self.psf_half_width)
-        psf_B = dispim.extract_psf(data[1], self.min_size, self.max_size, self.crop, self.psf_half_width)
-        data[0].psf = psf_A
-        data[1].psf = psf_B
+        psf_a = dispim.extract_psf(data[0], self.min_size, self.max_size, self.psf_half_width)
+        psf_b = dispim.extract_psf(data[1], self.min_size, self.max_size, self.psf_half_width)
 
-        return data
+        return Volume(data[0], psf=psf_a), Volume(data[1], psf=psf_b)
 
 
 class ProcessDeconvolve(ProcessStep):
-    def __init__(self, iters: int = 24, psf_A: str = None, psf_B: str = None):
+    def __init__(self, iters: int = 24, psf_a: str = None, psf_b: str = None):
         super().__init__()
-        self.psf_A = psf_A
-        self.psf_B = psf_B
+        self.psf_A = psf_a
+        self.psf_B = psf_b
         self.iters = int(iters)
 
     def process(self, data: ProcessData) -> ProcessData:
@@ -223,16 +204,17 @@ class ProcessDeconvolve(ProcessStep):
         else:
             psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
-        return dispim.deconvolve_psf(data[0], data[1], self.iters, psf_A, psf_B),
+        return dispim.deconvolve(data[0], data[1], self.iters, psf_A, psf_B),
 
 
 class ProcessDeconvolveChunked(ProcessStep):
-    def __init__(self, iters: int = 24, nchunks: int = 3, psf_A: str = None, psf_B: str = None):
+    def __init__(self, iters: int = 24, nchunks: int = 3, blind: bool = False, psf_a: str = None, psf_b: str = None):
         super().__init__()
-        self.psf_A = psf_A
-        self.psf_B = psf_B
+        self.psf_A = psf_a
+        self.psf_B = psf_b
         self.nchunks = int(nchunks)
         self.iters = int(iters)
+        self.blind = blind
 
     def process(self, data: ProcessData) -> ProcessData:
         if np.all(data[0].spacing != data[1].spacing):
@@ -245,86 +227,22 @@ class ProcessDeconvolveChunked(ProcessStep):
         from tifffile import imread
 
         logger.info('Deconvolving...')
-        # blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
-        # blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b/data[1].resolution[1], axis=1)
 
         if self.psf_A is None:
             if data[0].psf is None:
                 raise ValueError("No point spread function specified for A")
-            psf_A = data[0].psf
+            psf_a = data[0].psf
         else:
-            psf_A = imread(self.psf_A).swapaxes(0, 2).swapaxes(0, 1)
+            psf_a = imread(self.psf_A).swapaxes(0, 2).swapaxes(0, 1)
 
         if self.psf_B is None:
             if data[1].psf is None:
                 raise ValueError("No point spread function specified for B")
-            psf_B = data[1].psf
+            psf_b = data[1].psf
         else:
-            psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
+            psf_b = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
-        return dispim.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_A, psf_B, nchunks=self.nchunks),
-
-
-class ProcessDeconvolveDiag(ProcessStep):
-    def __init__(self, sigma_z: float, sigma_xy, iters: int = 16):
-        super().__init__()
-        self.sigma_z = sigma_z
-        self.sigma_xy = sigma_xy
-        self.iters = int(iters)
-
-    def process(self, data: ProcessData) -> ProcessData:
-        if np.all(data[0].spacing != data[1].spacing):
-            logger.error('Both volumes must have equal resolution to deconvolve. ')
-        if np.all(data[0].data.shape != data[1].data.shape):
-            logger.error('Both volumes must have equal dimensions to deconvolve. ')
-
-        logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
-
-        # sigma_a = self.sigma
-        # sigma_b = self.sigma
-        # # FIXME: Fix blur B
-        # if self.sigma == 0:
-        #     sigma_a, _ = dispim.compute_bead_psf(data[0])
-        #     logger.info(sigma_a)
-        #     # sigma_b, _ = dispim.compute_psf(data[1])
-
-        logger.info('Deconvolving...')
-        # blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
-        # blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b/data[1].resolution[1], axis=1)
-
-        return dispim.deconvolve_diag(data[0], data[1], self.iters, self.sigma_z, self.sigma_xy),
-
-
-class ProcessDeconvolveSeparate(ProcessStep):
-    def __init__(self, sigma: float, iters: int = 24):
-        super().__init__()
-        self.accepts_single = True
-        self.sigma = sigma
-        self.iters = iters
-
-    def process(self, data: ProcessData) -> ProcessData:
-        if len(data) == 2:
-            sigma_a = self.sigma
-            sigma_b = self.sigma
-            if self.sigma == 0:
-                logger.info("Extracting gaussian psf...")
-                sigma_a, _ = dispim.compute_psf(data[0])
-                sigma_b, _ = dispim.compute_psf(data[1])
-
-            blur_a = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_a / data[0].spacing[2], axis=2)
-            blur_b = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma_b / data[1].spacing[2], axis=2)
-
-            logger.info('Deconvolving using rl...')
-            return dispim.deconvolve_rl(data[0], self.iters, blur_a), dispim.deconvolve_rl(data[1], self.iters, blur_b)
-        else:
-            sigma = self.sigma
-            if self.sigma == 0:
-                logger.info("Extracting gaussian psf...")
-                sigma, _ = dispim.compute_psf(data[0])
-            # blur = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma/data[0].resolution[2], axis=2)
-            blur = lambda vol: scipy.ndimage.filters.gaussian_filter1d(vol, sigma / data[0].spacing[2], axis=2)
-            logger.info('Deconvolving using rl...')
-            return dispim.deconvolve_rl(data[0], self.iters, blur),
+        return dispim.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_a, psf_b, nchunks=self.nchunks, blind=self.blind),
 
 
 class ProcessCenterCrop(ProcessStep):
@@ -334,15 +252,10 @@ class ProcessCenterCrop(ProcessStep):
         self.crop_value = crop_value
 
     def process(self, data: ProcessData) -> ProcessData:
+        from dispim.util import crop_view
         result = []
         for vol in data:
-            # crop_offset = np.multiply(vol.data.shape, self.crop_value) // 2
-            # crop_offset = crop_offset.astype(np.int)
-            # center = np.floor_divide(vol.data.shape, 2)
-            # result.append(Volume(vol.data[center[0] - crop_offset[0]:center[0] + crop_offset[0],
-            #                      center[1] - crop_offset[1]:center[1] + crop_offset[1],
-            #                      center[2] - crop_offset[2]:center[2] + crop_offset[2]], vol.inverted, vol.spacing))
-            result.append(vol.crop_view(self.crop_value))
+            result.append(crop_view(vol, self.crop_value))
 
         # noinspection PyTypeChecker
         return tuple(result)
@@ -476,7 +389,8 @@ class ProcessRot90(ProcessStep):
         self.reverse = reverse
 
     def process(self, data: ProcessData) -> ProcessData:
-        return data[0], data[1].update(np.rot90(data[1].data, k=(3 if self.reverse else 1), axes=(1, 2)), spacing=(data[1].spacing[0], data[1].spacing[2], data[1].spacing[1]))
+        return data[0], data[1].update(np.rot90(data[1].data, k=(3 if self.reverse else 1), axes=(1, 2)),
+                                       spacing=(data[1].spacing[0], data[1].spacing[2], data[1].spacing[1]))
 
 
 class ProcessMakeIsotropic(ProcessStep):
@@ -525,30 +439,38 @@ class Processor(object):
         self.steps = steps
 
     def process(self, data: ProcessData, path: str, save_intermediate=False) -> ProcessData:
-        import gc, sys
-        for i, step in enumerate(self.steps):
-            # TODO: Check this BEFORE processing...
-            logger.info("Performing step {} on {} data".format(step.__class__.__name__,
-                                                               "dual" if len(data) == 2 else "single"))
-            if ((not step.accepts_dual and len(data) == 2) or
-                    (not step.accepts_single and len(data) == 1)):
-                if i > 0:
-                    raise ValueError('Step {} is incompatible with the output of step {}'
-                                     .format(step.__class__.__name__, self.steps[i - 1].__class__.__name__))
-                else:
-                    raise ValueError("Step {} is incompatible with the input data"
-                                     .format(step.__class__.__name__))
+        import gc
+        from dispim.metrics import PROCESS_TIME
+        from dispim import metrack
+        import time
+        with metrack.Context('Processor'):
+            for i, step in enumerate(self.steps):
+                # TODO: Check this BEFORE processing...
+                logger.info("Performing step {} on {} data".format(step.__class__.__name__,
+                                                                   "dual" if len(data) == 2 else "single"))
+                if ((not step.accepts_dual and len(data) == 2) or
+                        (not step.accepts_single and len(data) == 1)):
+                    if i > 0:
+                        raise ValueError('Step {} is incompatible with the output of step {}'
+                                         .format(step.__class__.__name__, self.steps[i - 1].__class__.__name__))
+                    else:
+                        raise ValueError("Step {} is incompatible with the input data"
+                                         .format(step.__class__.__name__))
 
-            for var, obj in locals().items():
-                if sys.getsizeof(obj) > 1024 * 1024 * 512:
-                    print(var, obj)
+                start = time.time()
 
-            data = step.process(data)
-            gc.collect()
+                with metrack.Context(f'{step.__class__.__name__} ({i})'):
+                    data = step.process(data)
 
-            if save_intermediate:
-                data[0].save_tiff(step.__class__.__name__ + "_A", path=path)
-                if len(data) > 1:
-                    data[1].save_tiff(step.__class__.__name__ + "_B", path=path)
+                end = time.time()
+
+                metrack.append_metric(PROCESS_TIME, (step.__class__.__name__, end-start))
+
+                gc.collect()
+
+                if save_intermediate:
+                    data[0].save_tiff(step.__class__.__name__ + "_A", path=path)
+                    if len(data) > 1:
+                        data[1].save_tiff(step.__class__.__name__ + "_B", path=path)
 
         return data

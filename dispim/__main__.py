@@ -10,51 +10,32 @@ logger = logging.getLogger(__name__)
 ops = ['deskew', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
        'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
        'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso', 'deconvolve_diag',
-       'extract_psf', 'show_front', 'deconvolve_chunked']
+       'extract_psf', 'show_front', 'deconvolve_chunked', 'register_com']
 VAR_SPEC = r"(?P<arg>(?:\d+(?:\.\d+))|(?:False)|(?:True)|(?:[a-zA-Z0-9_./\\]+))"
 OPERATION_SPEC = (r"^(" + "|".join(ops) + r")(?::" + VAR_SPEC + r")?(?:," + VAR_SPEC + ")*$")
 
 
 def process(args):
-    print('starting')
-    # import pydevd
-    # pydevd.settrace('localhost', port=8080, stdoutToServer = True, stderrToServer = True)
     import dispim
     if args.debug:
         dispim.debug = True
     from dispim import process
+    import dispim.io as dio
     if args.pixel_size > args.interval:
         logger.warning('The pixel size is greater than the interval. Arguments may have been swapped. ')
-    volumes = dispim.load_volumes([args.spim_a, args.spim_b] if args.spim_b is not None else [args.spim_a],
-                                  (args.pixel_size, args.pixel_size, args.interval), args.scale, not args.no_skew)
 
-    if args.a_invert:
-        logger.debug('A is inverted')
-        volumes[0].inverted = True
+    logging.getLogger("tifffile").setLevel(logging.CRITICAL)
 
-    if args.b_flipped_x:
-        volumes[1].flipped[0] = True
-
-    if args.b_flipped_y:
-        volumes[1].flipped[1] = True
-
-    if args.b_flipped_z:
-        volumes[1].flipped[2] = True
-
-    if args.swap_xy_a:
-        volumes[0].data = volumes[0].data.swapaxes(0, 1)
-
-    if args.swap_xy_b:
-        volumes[1].data = volumes[1].data.swapaxes(0, 1)
-
-    print('still starting')
-
-    # steps = []
-    # for op in args.operations:
-    #     class_name = 'Process' + op[0].upper() + op[1:]
-    #     class_ = getattr(process, class_name)
-    #     inst = class_()
-    #     steps.append(inst)
+    if args.spim_b is None:
+        volumes = dio.load_tiff(args.spim_a, channel=args.channel_index, series=args.series_index, inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval,
+                      flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
+    else:
+        vol_a = dio.load_tiff(args.spim_a, channel=args.channel_index, series=args.series_index,
+                                inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval)
+        vol_b = dio.load_tiff(args.spim_b, channel=args.channel_index, series=args.series_index,
+                                inverted=True, pixel_size=args.pixel_size, step_size=args.interval,
+                                flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
+        volumes = (vol_a, vol_b)
 
     logger.info("Starting data processing...")
     processor = process.Processor(args.operations)
@@ -65,25 +46,37 @@ def process(args):
         return
 
     if len(result) == 2:
-        if args.save_rg:
-            logging.info('Saving volume a/b...')
-            dispim.save_dual_tiff('out_AB', result[0], result[1], path=args.output)
-        logger.info('Saving volume a...')
-        if args.single_file_out:
-            result[0].save_tiff_single('out_A_single', swap_xy=args.swap_xy_a, path=args.output)
-        else:
-            result[0].save_tiff('out_A', swap_xy=args.swap_xy_a, path=args.output)
+        logger.info('Saving volume A...')
+        dio.save_tiff_output(result[0], args.output, f'vol_a_{args.channel_index}_{args.series_index}', args.b_8bit)
         logger.info('Saving volume b...')
-        if args.single_file_out:
-            result[1].save_tiff_single('out_B_single', swap_xy=args.swap_xy_b, path=args.output)
-        else:
-            result[1].save_tiff('out_B', swap_xy=args.swap_xy_b, path=args.output)
+        dio.save_tiff_output(result[1], args.output, f'vol_b_{args.channel_index}_{args.series_index}', args.b_8bit)
+        if args.save_rg:
+            logger.info('Saving volume A/B...')
+            dio.save_tiff_output_dual(result[0], result[1], args.output, f'vol_ab_{args.channel_index}_{args.series_index}', args.b_8bit)
     else:
         logger.info('Saving volume...')
-        if args.single_file_out:
-            result[0].save_tiff_single("out_single", path=args.output)
-        else:
-            result[0].save_tiff("out", path=args.output)
+        dio.save_tiff_output(result[0], args.output, f'vol_{args.channel_index}_{args.series_index}', args.b_8bit)
+
+    # if len(result) == 2:
+    #     if args.save_rg:
+    #         logging.info('Saving volume a/b...')
+    #         dispim.save_dual_tiff('out_AB', result[0], result[1], path=args.output)
+    #     logger.info('Saving volume a...')
+    #     if args.single_file_out:
+    #         result[0].save_tiff_single('out_A_single', swap_xy=args.swap_xy_a, path=args.output)
+    #     else:
+    #         result[0].save_tiff('out_A', swap_xy=args.swap_xy_a, path=args.output)
+    #     logger.info('Saving volume b...')
+    #     if args.single_file_out:
+    #         result[1].save_tiff_single('out_B_single', swap_xy=args.swap_xy_b, path=args.output)
+    #     else:
+    #         result[1].save_tiff('out_B', swap_xy=args.swap_xy_b, path=args.output)
+    # else:
+    #     logger.info('Saving volume...')
+    #     if args.single_file_out:
+    #         result[0].save_tiff_single("out_single", path=args.output)
+    #     else:
+    #         result[0].save_tiff("out", path=args.output)
 
 
 def isfloat(value):
@@ -153,6 +146,8 @@ def main():
     p_process.add_argument('--swap-xy-a', action='store_true', default=False)
     p_process.add_argument('--swap-xy-b', action='store_true', default=False)
     p_process.add_argument('--scale', type=float)
+    p_process.add_argument('--series-index', type=int, default=0)
+    p_process.add_argument('--channel-index', type=int, default=0)
     p_process.add_argument('--save-rg', action='store_true', default=False)
     p_process.add_argument('--single-file-out', action='store_true', default=False)
     p_process.add_argument('--save-inter', action='store_true', default=False)
@@ -163,6 +158,7 @@ def main():
     p_process.add_argument('--b-flipped-x', action='store_true', default=False)
     p_process.add_argument('--b-flipped-y', action='store_true', default=False)
     p_process.add_argument('--b-flipped-z', action='store_true', default=False)
+    p_process.add_argument('--b-8bit', action='store_true', default=False)
 
     p_process.add_argument('--debug', action='store_true', default=False)
 
