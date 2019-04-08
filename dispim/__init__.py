@@ -178,6 +178,8 @@ def unshift_fast(vol: Volume, invert: bool = False, estimate_true_interval: bool
         vol.spacing[2] = interval
         logger.debug('Estimated volume interval: {}'.format(interval))
 
+    # FIXME: Metadata is lost here
+
     if invert:
         data = unshift_fast_numbai(np.array(vol), vol.spacing)
         if rotate:
