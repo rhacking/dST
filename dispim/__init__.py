@@ -152,6 +152,8 @@ def save_dual_tiff_single(name: str, vol_a: Volume, vol_b: Volume, path: str = '
 
 def compute_true_interval(vol: Volume, invert: bool, n: int = 100) -> float:
     from scipy.optimize import minimize_scalar
+    from dispim.util import crop_view
+    vol = crop_view(vol, 0.4)
     resolution = vol.spacing
     rand_slice_indices = np.random.randint(0, vol.data.shape[2] - 1, n)
 
@@ -162,9 +164,9 @@ def compute_true_interval(vol: Volume, invert: bool, n: int = 100) -> float:
 
         error = 0
         for slice_index in rand_slice_indices:
-            shifted_b = scipy.ndimage.shift(vol.data[512:-512, 512:-512, slice_index + 1], (0, shift), order=1)
+            shifted_b = scipy.ndimage.shift(vol[:, :, slice_index + 1], (0, shift), order=1)
             error += np.mean(
-                (vol.data[512:-512, 512:-512, slice_index].astype(np.float) - shifted_b.astype(np.float)) ** 2)
+                (vol[:, :, slice_index].astype(np.float) - shifted_b.astype(np.float)) ** 2)
         return error
 
     result = minimize_scalar(compute_error)
@@ -175,7 +177,7 @@ def compute_true_interval(vol: Volume, invert: bool, n: int = 100) -> float:
 def unshift_fast(vol: Volume, invert: bool = False, estimate_true_interval: bool = True, rotate: bool = True) -> Volume:
     if estimate_true_interval:
         interval = compute_true_interval(vol, invert)
-        vol.spacing[2] = interval
+        vol = Volume(vol, spacing=vol.spacing[:2]+(interval, ))
         logger.debug('Estimated volume interval: {}'.format(interval))
 
     # FIXME: Metadata is lost here
