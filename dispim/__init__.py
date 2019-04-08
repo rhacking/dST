@@ -2,20 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import logging
-import math
 import os
 import shutil
 import warnings
-from typing import Tuple, Union, Callable, List
-import arrayfire as af
+from typing import Tuple, Union, Callable
 
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import progressbar
 import scipy
+from dipy.align.transforms import TranslationTransform3D, TranslationTransform2D
 from numba import jit, prange
 from scipy import ndimage
-from dipy.align.transforms import TranslationTransform3D, TranslationTransform2D
 
 from dispim import metrack
 
@@ -180,15 +179,15 @@ def unshift_fast(vol: Volume, invert: bool = False, estimate_true_interval: bool
         logger.debug('Estimated volume interval: {}'.format(interval))
 
     if invert:
-        data = unshift_fast_numbai(vol.data, vol.spacing)
+        data = unshift_fast_numbai(np.array(vol), vol.spacing)
         if rotate:
             data = np.rot90(data, k=2, axes=(1, 2))
-        return vol.update(data=data, inverted=False, spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
-                                                              vol.spacing[2] * np.sqrt(2)), is_skewed=False)
+        return Volume(data, inverted=False, spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+                                                     vol.spacing[2] * np.sqrt(2)), is_skewed=False)
     else:
-        return vol.update(data=unshift_fast_numba(vol.data, vol.spacing),
-                          spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
-                                   vol.spacing[2] * np.sqrt(2)), is_skewed=False)
+        return Volume(unshift_fast_numba(np.array(vol), vol.spacing),
+                      spacing=(vol.spacing[0], vol.spacing[1] / np.sqrt(2),
+                               vol.spacing[2] * np.sqrt(2)), is_skewed=False)
 
 
 @jit(nopython=True, parallel=True)
@@ -229,8 +228,8 @@ def unshift_fast_numba(data: np.ndarray, resolution: np.ndarray) -> np.ndarray:
 
             delta = x - layer_shift - x1
 
-            val1 = data[:, layer, x1] if 0 <= x1 < d else np.zeros((w), dtype=np.uint16)
-            val2 = data[:, layer, x2] if 0 <= x2 < d else np.zeros((w), dtype=np.uint16)
+            val1 = data[:, layer, x1] if 0 <= x1 < d else np.zeros(w, dtype=np.uint16)
+            val2 = data[:, layer, x2] if 0 <= x2 < d else np.zeros(w, dtype=np.uint16)
 
             result[:, layer, x] = val1 * (1 - delta) + val2 * delta
 
@@ -477,15 +476,17 @@ def deconvolve_gpu_chunked(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarr
     for i in range(nchunks):
         start = i * chunk_size
         end = (i + 1) * chunk_size if i < nchunks - 1 else vol_a.shape[2]
-        lpad = int(psf_a.shape[2]*3.7) if i > 0 else 0
-        rpad = int(psf_a.shape[2]*3.7) if i < nchunks - 1 else 0
+        lpad = int(psf_a.shape[2] * 3.7) if i > 0 else 0
+        rpad = int(psf_a.shape[2] * 3.7) if i < nchunks - 1 else 0
         with metrack.Context(f'Chunk {i}'):
             if not blind:
-                chunk_est = deconvolve_gpu(Volume(vol_a[:, :, start-lpad:end+rpad], False, (1, 1, 1)),
-                                           Volume(vol_b[:, :, start-lpad:end+rpad], False, (1, 1, 1)), n, psf_a, psf_b)
+                chunk_est = deconvolve_gpu(Volume(vol_a[:, :, start - lpad:end + rpad], False, (1, 1, 1)),
+                                           Volume(vol_b[:, :, start - lpad:end + rpad], False, (1, 1, 1)), n, psf_a,
+                                           psf_b)
             else:
-                chunk_est = deconvolve_gpu_blind(Volume(vol_a[:, :, start-lpad:end+rpad], False, (1, 1, 1)),
-                                                 Volume(vol_b[:, :, start-lpad:end+rpad], False, (1, 1, 1)), n, 5, psf_a, psf_b)
+                chunk_est = deconvolve_gpu_blind(Volume(vol_a[:, :, start - lpad:end + rpad], False, (1, 1, 1)),
+                                                 Volume(vol_b[:, :, start - lpad:end + rpad], False, (1, 1, 1)), n, 5,
+                                                 psf_a, psf_b)
 
         af.device_gc()
 
@@ -532,7 +533,7 @@ def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_
             estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 10), psf_Bi)
 
             if metrack.is_tracked(DECONV_MSE_DELTA):
-                metrack.append_metric(DECONV_MSE_DELTA, (_, float(np.mean((prev-estimate)**2))))
+                metrack.append_metric(DECONV_MSE_DELTA, (_, float(np.mean((prev - estimate) ** 2))))
 
     CURSOR_UP_ONE = '\x1b[1A'
     ERASE_LINE = '\x1b[2K'
@@ -548,14 +549,17 @@ def deconvolve_gpu_blind(vol_a: Volume, vol_b: Volume, n: int, m: int, psf_a: np
 
     psf_a = psf_a.astype(np.float) / np.sum(psf_a).astype(np.float)
     psf_b = psf_b.astype(np.float) / np.sum(psf_b).astype(np.float)
-    padding = tuple((int(s // 2 - psf_a.shape[i]), int((s - s // 2) - psf_a.shape[i])) for i, s in enumerate(view_a.shape))
+    padding = tuple(
+        (int(s // 2 - psf_a.shape[i]), int((s - s // 2) - psf_a.shape[i])) for i, s in enumerate(view_a.shape))
     print(psf_a.shape)
     print(psf_b.shape)
     psf_a = np.pad(psf_a,
-                   tuple(((s - psf_a.shape[i])//2, (s - psf_a.shape[i]) - (s - psf_a.shape[i])//2) for i, s in enumerate(view_a.shape)), 'constant')
+                   tuple(((s - psf_a.shape[i]) // 2, (s - psf_a.shape[i]) - (s - psf_a.shape[i]) // 2) for i, s in
+                         enumerate(view_a.shape)), 'constant')
     print(psf_b.shape)
     psf_b = np.pad(psf_b,
-                   tuple(((s - psf_b.shape[i])//2, (s - psf_b.shape[i]) - (s - psf_b.shape[i])//2) for i, s in enumerate(view_b.shape)), 'constant')
+                   tuple(((s - psf_b.shape[i]) // 2, (s - psf_b.shape[i]) - (s - psf_b.shape[i]) // 2) for i, s in
+                         enumerate(view_b.shape)), 'constant')
     print(psf_a.shape, view_a.shape)
     print(psf_b.shape, view_b.shape)
     # psf_Ai = psf_a[::-1, ::-1, ::-1]
@@ -615,22 +619,23 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
     points = points[np.random.choice(len(points), min(len(points), 12000), replace=False), :]
 
     blob_images = []
-    for point in points[min(10000, len(points)-1)]:
+    for point in points[min(10000, len(points) - 1)]:
         blob_images.append(extract_3d(data, point, psf_half_width))
 
         if metrack.is_tracked(PSF_SIGMA_XY) or metrack.is_tracked(PSF_SIGMA_Z):
             height, center_x, center_y, width_x, width_y, rotation = fitgaussian(blob_images[-1][psf_half_width, :, :])
             scale = vol.shape[0]
             if width_x > width_y:
-                metrack.append_metric(PSF_SIGMA_Z, (None, width_x*scale))
-                metrack.append_metric(PSF_SIGMA_XY, (None, width_y*scale))
+                metrack.append_metric(PSF_SIGMA_Z, (None, width_x * scale))
+                metrack.append_metric(PSF_SIGMA_XY, (None, width_y * scale))
             else:
-                metrack.append_metric(PSF_SIGMA_Z, (None, width_y*scale))
-                metrack.append_metric(PSF_SIGMA_XY, (None, width_x*scale))
+                metrack.append_metric(PSF_SIGMA_Z, (None, width_y * scale))
+                metrack.append_metric(PSF_SIGMA_XY, (None, width_x * scale))
 
     median_blob = np.median(blob_images, axis=0)
 
     return median_blob
+
 
 def gaussian(height, center_x, center_y, width_x, width_y, rotation):
     """Returns a gaussian function with the given parameters"""
@@ -651,6 +656,7 @@ def gaussian(height, center_x, center_y, width_x, width_y, rotation):
 
     return rotgauss
 
+
 def moments(data):
     """Returns (height, x, y, width_x, width_y)
     the gaussian parameters of a 2D distribution by calculating its
@@ -666,6 +672,7 @@ def moments(data):
     height = data.max()
     return height, x, y, width_x, width_y, 0.0
 
+
 def fitgaussian(data):
     import scipy.optimize
     """Returns (height, x, y, width_x, width_y)
@@ -674,6 +681,7 @@ def fitgaussian(data):
     errorfunction = lambda p: np.ravel(gaussian(*p)(*np.indices(data.shape)) - data)
     p, success = scipy.optimize.leastsq(errorfunction, params)
     return p
+
 
 def apply_registration(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
     from scipy.ndimage import affine_transform
