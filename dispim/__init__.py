@@ -615,7 +615,7 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
     points = points[np.random.choice(len(points), min(len(points), 12000), replace=False), :]
 
     blob_images = []
-    for point in points:
+    for point in points[min(10000, len(points)-1)]:
         blob_images.append(extract_3d(data, point, psf_half_width))
 
         if metrack.is_tracked(PSF_SIGMA_XY) or metrack.is_tracked(PSF_SIGMA_Z):

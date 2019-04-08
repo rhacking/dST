@@ -1,9 +1,9 @@
 from setuptools import setup
 
 setup(
-    name='DST',
+    name='dST',
     version='0.1',
-    package='dispim',
+    packages=['dispim', ],
     entry_points={
         'console_scripts': {
             'dispim = dispim.__main__:main'
