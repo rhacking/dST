@@ -640,6 +640,10 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
     return median_blob
 
 
+def fuse(vol_a: Volume, vol_b: Volume) -> Volume:
+    return (vol_a + vol_b) / 2
+
+
 def gaussian(height, center_x, center_y, width_x, width_y, rotation):
     """Returns a gaussian function with the given parameters"""
     width_x = float(width_x)
