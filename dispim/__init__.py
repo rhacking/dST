@@ -480,24 +480,28 @@ def deconvolve_gpu_chunked(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarr
     for i in range(nchunks):
         start = i * chunk_size
         end = (i + 1) * chunk_size if i < nchunks - 1 else vol_a.shape[2]
-        lpad = int(psf_a.shape[2] * 3.7) if i > 0 else 0
-        rpad = int(psf_a.shape[2] * 3.7) if i < nchunks - 1 else 0
+        lpad = int(psf_a.shape[2] * 3)
+        rpad = int(psf_a.shape[2] * 2)
+
+        start_exp = max(0, start-lpad)
+        end_exp = min(vol_a.shape[2], end+rpad)
+
         with metrack.Context(f'Chunk {i}'):
             if not blind:
-                chunk_est = deconvolve_gpu(Volume(vol_a[:, :, start - lpad:end + rpad], False, (1, 1, 1)),
-                                           Volume(vol_b[:, :, start - lpad:end + rpad], False, (1, 1, 1)), n, psf_a,
+                chunk_est = deconvolve_gpu(Volume(vol_a[:, :, start_exp:end_exp], False, (1, 1, 1)),
+                                           Volume(vol_b[:, :, start_exp:end_exp], False, (1, 1, 1)), n, psf_a,
                                            psf_b)
             else:
-                chunk_est = deconvolve_gpu_blind(Volume(vol_a[:, :, start - lpad:end + rpad], False, (1, 1, 1)),
-                                                 Volume(vol_b[:, :, start - lpad:end + rpad], False, (1, 1, 1)), n, 5,
+                chunk_est = deconvolve_gpu_blind(Volume(vol_a[:, :, start_exp:end_exp], False, (1, 1, 1)),
+                                                 Volume(vol_b[:, :, start_exp:end_exp], False, (1, 1, 1)), n, 5,
                                                  psf_a, psf_b)
 
         af.device_gc()
 
-        if rpad > 0:
-            result[:, :, start:end] = chunk_est[:, :, lpad:-rpad]
+        if end != end_exp:
+            result[:, :, start:end] = chunk_est[:, :, start-start_exp:end-end_exp]
         else:
-            result[:, :, start:end] = chunk_est[:, :, lpad:]
+            result[:, :, start:end] = chunk_est[:, :, start-start_exp:]
 
     e_min, e_max = np.percentile(result, [0.002, 99.998])
     result = ((np.clip(result, e_min, e_max) - e_min) / (e_max - e_min) * (2 ** 16 - 1)).astype(np.uint16)
@@ -510,6 +514,8 @@ def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_
     from dispim.metrics import DECONV_MSE_DELTA
     import arrayfire as af
 
+    print(vol_a.shape, vol_b.shape)
+
     view_a, view_b = vol_a.astype(np.float), vol_b.astype(np.float)
 
     psf_a = psf_a.astype(np.float) / np.sum(psf_a).astype(np.float)
@@ -517,8 +523,8 @@ def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_
     psf_Ai = psf_a[::-1, ::-1, ::-1]
     psf_Bi = psf_b[::-1, ::-1, ::-1]
 
-    view_a = af.cast(af.from_ndarray(view_a), af.Dtype.f32)
-    view_b = af.cast(af.from_ndarray(view_b), af.Dtype.f32)
+    view_a = af.cast(af.from_ndarray(np.array(view_a)), af.Dtype.f32)
+    view_b = af.cast(af.from_ndarray(np.array(view_b)), af.Dtype.f32)
 
     psf_a = af.cast(af.from_ndarray(psf_a), af.Dtype.f32)
     psf_b = af.cast(af.from_ndarray(psf_b), af.Dtype.f32)
