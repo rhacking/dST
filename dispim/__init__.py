@@ -539,8 +539,8 @@ def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_
         for _ in bar(range(n)):
             if metrack.is_tracked(DECONV_MSE_DELTA):
                 prev = estimate
-            estimate = estimate * convolve(view_a / (convolve(estimate, psf_a) + 10), psf_Ai)
-            estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 10), psf_Bi)
+            estimate = estimate * convolve(view_a / (convolve(estimate, psf_a) + 20), psf_Ai)
+            estimate = estimate * convolve(view_b / (convolve(estimate, psf_b) + 20), psf_Bi)
 
             if metrack.is_tracked(DECONV_MSE_DELTA):
                 metrack.append_metric(DECONV_MSE_DELTA, (_, float(np.mean((prev - estimate) ** 2))))
@@ -548,6 +548,8 @@ def deconvolve_gpu(vol_a: Volume, vol_b: Volume, n: int, psf_a: np.ndarray, psf_
     CURSOR_UP_ONE = '\x1b[1A'
     ERASE_LINE = '\x1b[2K'
     print(CURSOR_UP_ONE + ERASE_LINE + CURSOR_UP_ONE)
+
+    logger.debug(f'Deconved min: {np.min(estimate)}, max: {np.max(estimate)}, has nan: {np.any(np.isnan(estimate))}')
 
     return Volume(estimate.to_ndarray(), inverted=False, spacing=vol_a.spacing, is_skewed=False)
 
@@ -642,6 +644,8 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
                 metrack.append_metric(PSF_SIGMA_XY, (None, width_x * scale))
 
     median_blob = np.median(blob_images, axis=0)
+
+    logger.debug(f'PSF mean: {median_blob.mean()}, median: {np.median(median_blob)}, min: {median_blob.min()}, max: {median_blob.max()}')
 
     return median_blob
 
