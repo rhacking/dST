@@ -606,12 +606,11 @@ def deconvolve_gpu_blind(vol_a: Volume, vol_b: Volume, n: int, m: int, psf_a: np
 
 
 def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_width: int = 7) -> np.ndarray:
-    from skimage.filters import threshold_otsu
     from skimage.measure import label, regionprops
-    from dispim.util import extract_3d
+    from dispim.util import extract_3d, threshold_otsu
     from dispim.metrics import PSF_SIGMA_XY, PSF_SIGMA_Z
     data = vol
-    thr = threshold_otsu(data)
+    thr = threshold_otsu(data[:, :, ])
     data_bin = data > thr
 
     points = np.array([np.array(r.centroid, dtype=np.int) for r in regionprops(label(data_bin))
