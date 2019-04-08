@@ -614,8 +614,8 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
     thr = threshold_otsu(data)
     data_bin = data > thr
 
-    points = [np.array(r.centroid, dtype=np.int) for r in regionprops(label(data_bin))
-              if min_size <= r.area <= max_size]
+    points = np.array([np.array(r.centroid, dtype=np.int) for r in regionprops(label(data_bin))
+              if min_size <= r.area <= max_size])
 
     logger.debug(f'Found {len(points)} objects')
 
@@ -623,7 +623,7 @@ def extract_psf(vol: Volume, min_size: int = 50, max_size: int = 140, psf_half_w
     points = points[np.random.choice(len(points), min(len(points), 12000), replace=False), :]
 
     blob_images = []
-    for point in points[min(10000, len(points) - 1)]:
+    for point in points:
         blob_images.append(extract_3d(data, point, psf_half_width))
 
         if metrack.is_tracked(PSF_SIGMA_XY) or metrack.is_tracked(PSF_SIGMA_Z):
