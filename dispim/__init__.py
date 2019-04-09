@@ -240,17 +240,21 @@ def unshift_fast_numba(data: np.ndarray, resolution: np.ndarray) -> np.ndarray:
     return result
 
 
-def unshift_fast_diag(vol: Volume, invert: bool = False, rotate: bool = True) -> Volume:
-    # FIXME: The resolution is incorrect!!!!! fix it!!!!
-    # interval = compute_true_interval(vol, invert)
-    # vol.spacing[2] = interval
+def unshift_fast_diag(vol: Volume, invert: bool = False, estimate_true_interval: bool = True, rotate: bool = True) -> Volume:
+    if estimate_true_interval:
+        interval = compute_true_interval(vol, invert)
+        vol = Volume(vol, spacing=vol.spacing[:2]+(interval, ))
+        logger.debug('Estimated volume interval: {}'.format(interval))
+
+    # FIXME: Metadata is lost here
+
     if invert:
-        data = unshift_fast_numbai_diag(vol.data, vol.spacing)
+        data = unshift_fast_numbai_diag(np.array(vol), vol.spacing)
         if rotate:
-            data = np.rot90(data, k=1, axes=(1, 2))
-        return vol.update(data=data, is_skewed=False, inverted=False)
+            data = np.rot90(data, k=2, axes=(1, 2))
+        return Volume(data, inverted=False, is_skewed=False)
     else:
-        return vol.update(data=unshift_fast_numba_diag(vol.data, vol.spacing))
+        return Volume(unshift_fast_numba_diag(np.array(vol), vol.spacing), is_skewed=False)
 
 
 @jit(nopython=True, parallel=True)

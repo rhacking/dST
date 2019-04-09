@@ -7,7 +7,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-ops = ['deskew', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
+ops = ['deskew', 'deskew_diag', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
        'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
        'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso', 'deconvolve_diag',
        'extract_psf', 'show_front', 'deconvolve_chunked', 'register_com']

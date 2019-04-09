@@ -47,6 +47,26 @@ class ProcessDeskew(ProcessStep):
 
 
 class ProcessDeskewDiag(ProcessStep):
+    def __init__(self, invert_a=False, invert_b=True, estimate_true_interval=False):
+        super().__init__()
+        self.accepts_single = True
+        print(invert_a)
+        print(invert_b)
+        self.invert_a = invert_a
+        self.invert_b = invert_b
+        self.estimate_true_interval = estimate_true_interval
+
+    def process(self, data: ProcessData) -> ProcessData:
+        if len(data) == 2:
+            return dispim.unshift_fast_diag(data[0], self.invert_a, estimate_true_interval=self.estimate_true_interval), dispim.unshift_fast_diag(
+                data[1], self.invert_b, estimate_true_interval=self.estimate_true_interval)
+        else:
+            return dispim.unshift_fast_diag(data[0], invert=self.invert_a, estimate_true_interval=self.estimate_true_interval),
+            # return dispim.unshift(data[0], self.invert_a),
+
+
+
+class ProcessDeskewDiag(ProcessStep):
     def __init__(self, invert_a=False, invert_b=True):
         super().__init__()
         self.accepts_single = True
