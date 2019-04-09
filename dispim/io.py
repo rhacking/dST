@@ -32,7 +32,7 @@ def generate_output_dir(path: str):
 
 def save_tiff(data: Volume, path: str, b_8bit: bool = False):
     # TODO: Deal with large fractions more robustly
-    with tifffile.TiffWriter(path) as f:
+    with tifffile.TiffWriter(path, bigtiff=True) as f:
         f.save(np.moveaxis(data if not b_8bit else data / 2 ** 8, [2, 0, 1], [0, 1, 2]), resolution=(np.round(1/(data.spacing[0]/10000), decimals=5), np.round(1/(data.spacing[1]/10000), decimals=5), 'CENTIMETER'))
 
 
@@ -41,7 +41,7 @@ def save_tiff_dual(vol_a: Volume, vol_b: Volume, path: str, b_8bit: bool = False
     data = np.array([
         vol_a, vol_b, np.zeros_like(vol_a)
     ])
-    with tifffile.TiffWriter(path) as f:
+    with tifffile.TiffWriter(path, bigtiff=True) as f:
         f.save(np.moveaxis(data if not b_8bit else data / 2 ** 8, [0, 3, 1, 2], [1, 0, 2, 3]), resolution=(np.round(1/(vol_a.spacing[0]/10000), decimals=5), np.round(1/(vol_b.spacing[1]/10000), decimals=5), 'CENTIMETER'))
 
 
