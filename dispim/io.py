@@ -45,6 +45,31 @@ def save_tiff_dual(vol_a: Volume, vol_b: Volume, path: str, b_8bit: bool = False
         f.save(np.moveaxis(data if not b_8bit else data / 2 ** 8, [0, 3, 1, 2], [1, 0, 2, 3]), resolution=(np.round(1/(vol_a.spacing[0]/10000), decimals=5), np.round(1/(vol_b.spacing[1]/10000), decimals=5), 'CENTIMETER'))
 
 
+def save_tiff_chunks(vol: Volume, path: str, size: int, stride: int, b_8bit: bool = False):
+    import shutil
+    import pathlib
+
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+
+    pathlib.Path(path).mkdir(parents=True)
+
+    i = 0
+    for x in range(0, vol.shape[0]-size+1, stride):
+        for y in range(0, vol.shape[1]-size+1, stride):
+            for z in range(0, vol.shape[2]-size+1, stride):
+                data = vol[x:x+size, y:y+size, z:z+size]
+                chunk_path = os.path.join(path, f'{i}.tif')
+
+                print(chunk_path)
+                with tifffile.TiffWriter(chunk_path, bigtiff=False) as f:
+                    f.save(np.moveaxis(data if not b_8bit else data / 2 ** 8, [2, 0, 1], [0, 1, 2]), resolution=(
+                        np.round(1 / (data.spacing[0] / 10000), decimals=5),
+                        np.round(1 / (data.spacing[1] / 10000), decimals=5), 'CENTIMETER'))
+
+                i += 1
+
+
 def load_tiff(path: str, series: int = 0, channel: int = 0, inverted: bool = False,
               flipped: Tuple[bool] = (False, False, False), pixel_size: float = None,
               step_size: float = None) -> Union[Tuple[Volume, Volume], Tuple[Volume]]:
