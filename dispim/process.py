@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Callable, Optional
 
 import numpy as np
 import scipy.ndimage
@@ -65,25 +65,6 @@ class ProcessDeskewDiag(ProcessStep):
             # return dispim.unshift(data[0], self.invert_a),
 
 
-
-class ProcessDeskewDiag(ProcessStep):
-    def __init__(self, invert_a=False, invert_b=True):
-        super().__init__()
-        self.accepts_single = True
-        print(invert_a)
-        print(invert_b)
-        self.invert_a = invert_a
-        self.invert_b = invert_b
-
-    def process(self, data: ProcessData) -> ProcessData:
-        if len(data) == 2:
-            return dispim.unshift_fast_diag(data[0], self.invert_a), dispim.unshift_fast_diag(
-                data[1], self.invert_b)
-        else:
-            return dispim.unshift_fast(data[0], invert=self.invert_a, estimate_true_interval=False),
-            # return dispim.unshift(data[0], self.invert_a),
-
-
 class ProcessRegisterCom(ProcessStep):
     def __init__(self):
         super().__init__()
@@ -127,8 +108,12 @@ class ProcessRegister2d(ProcessStep):
 
 
 class ProcessApplyRegistration(ProcessStep):
+    def __init__(self, order: int = 2):
+        super().__init__()
+        self.order = order
+
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.apply_registration(data[0], data[1])
+        return dispim.apply_registration(data[0], data[1], order=self.order)
 
 
 class ProcessFuse(ProcessStep):
@@ -264,6 +249,27 @@ class ProcessDeconvolveChunked(ProcessStep):
             psf_b = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
         return dispim.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_a, psf_b, nchunks=self.nchunks, blind=self.blind),
+
+
+class ProcessSaveChunks(ProcessStep):
+    def __init__(self, output: str, size: int = 64, stride: Optional[int] = None):
+        super().__init__()
+        self.output = output
+        self.size = size
+        self.stride = stride if stride is not None else size
+        self.accepts_single = True
+
+    def process(self, data: ProcessData) -> ProcessData:
+        import dispim.io as dio
+        import os
+
+        if len(data) == 2:
+            dio.save_tiff_chunks(data[0], os.path.join(self.output, 'A'), self.size, self.stride)
+            dio.save_tiff_chunks(data[1], os.path.join(self.output, 'B'), self.size, self.stride)
+        else:
+            dio.save_tiff_chunks(data[0], self.output, self.size, self.stride)
+
+        return data
 
 
 class ProcessCenterCrop(ProcessStep):

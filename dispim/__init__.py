@@ -704,7 +704,7 @@ def fitgaussian(data):
     return p
 
 
-def apply_registration(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
+def apply_registration(vol_a: Volume, vol_b: Volume, order: int = 2) -> Tuple[Volume, Volume]:
     from scipy.ndimage import affine_transform
     min_res = min(np.min(vol_a.spacing), np.min(vol_b.spacing))
 
@@ -724,7 +724,7 @@ def apply_registration(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
         np.linalg.inv(transform_a) @ np.array([vol_a.shape[0], vol_a.shape[1], vol_a.shape[2], 1]))).astype(
         np.int)[:3]
 
-    vol_a = Volume(affine_transform(vol_a, transform_a, output_shape=final_shape, order=2),
+    vol_a = Volume(affine_transform(vol_a, transform_a, output_shape=final_shape, order=order),
                    spacing=(min_res, min_res, min_res), is_skewed=False, inverted=False)
 
     transform_b = np.linalg.inv(vol_b.grid_to_world)
@@ -733,7 +733,7 @@ def apply_registration(vol_a: Volume, vol_b: Volume) -> Tuple[Volume, Volume]:
 
     logger.debug(f'Final B transform:\n{transform_b}')
 
-    transformed = affine_transform(vol_b, transform_b, output_shape=final_shape, order=2)
+    transformed = affine_transform(vol_b, transform_b, output_shape=final_shape, order=order)
 
     logger.debug(f'Transformed A average value: {np.mean(vol_a)}')
     logger.debug(f'Transformed B average value: {np.mean(transformed)}')
