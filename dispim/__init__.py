@@ -382,6 +382,8 @@ def register_2d(vol_a: Volume, vol_b: Volume, axis: int = 2, transform_cls: type
         vol_b.world_transform[:2, :2] = affine.affine[:2, :2]
         vol_b.world_transform[:2, 3] = affine.affine[:2, 2]
 
+    logger.debug('Registration transform: ' + str(vol_b.world_transform))
+
     return vol_a, vol_b
 
 
@@ -425,7 +427,7 @@ def register_dipy(vol_a: Volume, vol_b: Volume,
     else:
         callback = None
 
-    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop, sampling_type='random'),
+    affreg = AffineRegistration(metric=MutualInformationMetric(32, sampling_prop, sampling_type='grid'),
                                 level_iters=level_iters,
                                 sigmas=sigmas,
                                 factors=factors)

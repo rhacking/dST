@@ -61,7 +61,6 @@ def save_tiff_chunks(vol: Volume, path: str, size: int, stride: int, b_8bit: boo
                 data = vol[x:x+size, y:y+size, z:z+size]
                 chunk_path = os.path.join(path, f'{i}.tif')
 
-                print(chunk_path)
                 with tifffile.TiffWriter(chunk_path, bigtiff=False) as f:
                     f.save(np.moveaxis(data if not b_8bit else data / 2 ** 8, [2, 0, 1], [0, 1, 2]), resolution=(
                         np.round(1 / (data.spacing[0] / 10000), decimals=5),
