@@ -45,8 +45,9 @@ class DSTGui(wx.Frame):
         # end wxGlade
 
     def add_process(self, event):  # wxGlade: DSTGui.<event_handler>
-        self.list_box_1.InsertItems(['test'], self.list_box_1.GetSelection()+1)
+        self.list_box_1.InsertItems(['test'], self.list_box_1.GetSelection() + 1)
         # event.Skip()
+
 
 # end of class DSTGui
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from typing import List, Tuple, Union, Callable, Optional
+from typing import List, Tuple, Union, Optional
 
 import numpy as np
 import scipy.ndimage
@@ -11,6 +11,9 @@ from dipy.align.transforms import (TranslationTransform3D, TranslationTransform2
                                    AffineTransform3D, AffineTransform2D)
 
 import dispim
+import dispim.deconvolution
+import dispim.register
+import dispim.transform
 from dispim import Volume
 
 logger = logging.getLogger(__name__)
@@ -39,10 +42,12 @@ class ProcessDeskew(ProcessStep):
 
     def process(self, data: ProcessData) -> ProcessData:
         if len(data) == 2:
-            return dispim.unshift_fast(data[0], self.invert_a, estimate_true_interval=self.estimate_true_interval), dispim.unshift_fast(
+            return dispim.transform.unshift_fast(data[0], self.invert_a,
+                                                 estimate_true_interval=self.estimate_true_interval), dispim.transform.unshift_fast(
                 data[1], self.invert_b, estimate_true_interval=self.estimate_true_interval)
         else:
-            return dispim.unshift_fast(data[0], invert=self.invert_a, estimate_true_interval=self.estimate_true_interval),
+            return dispim.transform.unshift_fast(data[0], invert=self.invert_a,
+                                                 estimate_true_interval=self.estimate_true_interval),
             # return dispim.unshift(data[0], self.invert_a),
 
 
@@ -58,10 +63,12 @@ class ProcessDeskewDiag(ProcessStep):
 
     def process(self, data: ProcessData) -> ProcessData:
         if len(data) == 2:
-            return dispim.unshift_fast_diag(data[0], self.invert_a, estimate_true_interval=self.estimate_true_interval), dispim.unshift_fast_diag(
+            return dispim.transform.unshift_fast_diag(data[0], self.invert_a,
+                                                      estimate_true_interval=self.estimate_true_interval), dispim.transform.unshift_fast_diag(
                 data[1], self.invert_b, estimate_true_interval=self.estimate_true_interval)
         else:
-            return dispim.unshift_fast_diag(data[0], invert=self.invert_a, estimate_true_interval=self.estimate_true_interval),
+            return dispim.transform.unshift_fast_diag(data[0], invert=self.invert_a,
+                                                      estimate_true_interval=self.estimate_true_interval),
             # return dispim.unshift(data[0], self.invert_a),
 
 
@@ -70,7 +77,7 @@ class ProcessRegisterCom(ProcessStep):
         super().__init__()
 
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.register_com(data[0], data[1])
+        return dispim.register.register_com(data[0], data[1])
 
 
 class ProcessRegister(ProcessStep):
@@ -87,8 +94,8 @@ class ProcessRegister(ProcessStep):
         self.sampling_prop = sampling_prop
 
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.register_dipy(data[0], data[1], sampling_prop=self.sampling_prop, crop=self.crop,
-                                    transform_cls=self.transform_cls)
+        return dispim.register.register_dipy(data[0], data[1], sampling_prop=self.sampling_prop, crop=self.crop,
+                                             transform_cls=self.transform_cls)
 
 
 class ProcessRegister2d(ProcessStep):
@@ -104,16 +111,16 @@ class ProcessRegister2d(ProcessStep):
         self.transform_cls = self.type_mapping[transform_type]
 
     def process(self, data: ProcessData):
-        return dispim.register_2d(*data, axis=self.axis, transform_cls=self.transform_cls)
+        return dispim.register.register_2d(*data, axis=self.axis, transform_cls=self.transform_cls)
 
 
 class ProcessApplyRegistration(ProcessStep):
     def __init__(self, order: int = 2):
         super().__init__()
-        self.order = order
+        self.order = int(order)
 
     def process(self, data: ProcessData) -> ProcessData:
-        return dispim.apply_registration(data[0], data[1], order=self.order)
+        return dispim.transform.apply_registration(data[0], data[1], order=self.order)
 
 
 class ProcessFuse(ProcessStep):
@@ -128,7 +135,7 @@ class ProcessFuse(ProcessStep):
 
         logger.info("Resolution A: {}, Resolution B: {}".format(data[0].spacing, data[1].spacing))
 
-        return dispim.fuse(data[0], data[1]),
+        return dispim.deconvolve.fuse(data[0], data[1]),
 
 
 class ProcessBrighten(ProcessStep):
@@ -169,8 +176,8 @@ class ProcessExtractPsf(ProcessStep):
         self.psf_half_width = int(psf_half_width)
 
     def process(self, data: ProcessData):
-        psf_a = dispim.extract_psf(data[0], self.min_size, self.max_size, self.psf_half_width)
-        psf_b = dispim.extract_psf(data[1], self.min_size, self.max_size, self.psf_half_width)
+        psf_a = dispim.deconvolve.extract_psf(data[0], self.min_size, self.max_size, self.psf_half_width)
+        psf_b = dispim.deconvolve.extract_psf(data[1], self.min_size, self.max_size, self.psf_half_width)
 
         return Volume(data[0], psf=psf_a), Volume(data[1], psf=psf_b)
 
@@ -210,7 +217,7 @@ class ProcessDeconvolve(ProcessStep):
         else:
             psf_B = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
-        return dispim.deconvolve(data[0], data[1], self.iters, psf_A, psf_B),
+        return dispim.deconvolve.deconvolve(data[0], data[1], self.iters, psf_A, psf_B),
 
 
 class ProcessDeconvolveChunked(ProcessStep):
@@ -248,15 +255,16 @@ class ProcessDeconvolveChunked(ProcessStep):
         else:
             psf_b = imread(self.psf_B).swapaxes(0, 2).swapaxes(0, 1)
 
-        return dispim.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_a, psf_b, nchunks=self.nchunks, blind=self.blind),
+        return dispim.deconvolve.deconvolve_gpu_chunked(data[0], data[1], self.iters, psf_a, psf_b,
+                                                        nchunks=self.nchunks, blind=self.blind),
 
 
 class ProcessSaveChunks(ProcessStep):
     def __init__(self, output: str, size: int = 64, stride: Optional[int] = None):
         super().__init__()
         self.output = output
-        self.size = size
-        self.stride = stride if stride is not None else size
+        self.size = int(size)
+        self.stride = int(stride) if stride is not None else int(size)
         self.accepts_single = True
 
     def process(self, data: ProcessData) -> ProcessData:
@@ -491,7 +499,7 @@ class Processor(object):
 
                 end = time.time()
 
-                metrack.append_metric(PROCESS_TIME, (step.__class__.__name__, end-start))
+                metrack.append_metric(PROCESS_TIME, (step.__class__.__name__, end - start))
 
                 gc.collect()
 

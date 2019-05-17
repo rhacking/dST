@@ -1,5 +1,6 @@
 import numpy as np
 import dispim
+import dispim.register
 from dispim import Volume
 
 import pytest
@@ -104,7 +105,7 @@ def test_register2d(fractal_noise, offset):
     assert np.allclose(a.grid_to_world, np.eye(4))
     assert np.allclose(b.grid_to_world, np.eye(4))
 
-    dispim.register_2d(a, b, axis=2)
+    dispim.register.register_2d(a, b, axis=2)
 
     b_transformed = affine_transform(b, b.world_transform, order=1)
 
@@ -135,9 +136,9 @@ def test_reigster_dipy(test_data, offset):
     assert np.allclose(a.grid_to_world, np.eye(4))
     assert np.allclose(b.grid_to_world, np.eye(4))
 
-    dispim.register_com(a, b)
-    dispim.register_dipy(a, b, crop=1.0)
-    dispim.register_dipy(a, b, crop=1.0)
+    dispim.register.register_com(a, b)
+    dispim.register.register_dipy(a, b, crop=1.0)
+    dispim.register.register_dipy(a, b, crop=1.0)
 
     estimated_offset = -(b.world_transform[:3, 3])
     assert np.allclose(estimated_offset, offset, atol=0.2, rtol=0.05)

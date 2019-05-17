@@ -7,7 +7,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
-ops = ['deskew', 'deskew_diag', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale', 'discard_a',
+ops = ['deskew', 'deskew_diag', 'register', 'fuse', 'deconvolve', 'deconvolve_separate', 'center_crop', 'scale',
+       'discard_a',
        'discard_b', 'show_slice_y_z', 'rot90', 'make_isotropic', 'show_dual', 'apply_registration', 'register_syn',
        'register2d', 'brighten', 'show_a_iso', 'show_b_iso', 'show_overlay_iso', 'show_seperate_iso', 'deconvolve_diag',
        'extract_psf', 'show_front', 'deconvolve_chunked', 'register_com', 'save_chunks']
@@ -27,14 +28,18 @@ def process(args):
     logging.getLogger("tifffile").setLevel(logging.CRITICAL)
 
     if args.spim_b is None:
-        volumes = dio.load_tiff(args.spim_a, channel=args.channel_index, series=args.series_index, inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval,
-                      flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
+        volumes = dio.load_tiff(args.spim_a, channel=args.channel_index, series=args.series_index,
+                                inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval,
+                                flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
+        # TODO: Make this nicer
+        if len(volumes) == 2 and args.b_not_invert:
+            volumes[1] = dispim.Volume(volumes[1], inverted=False)
     else:
         vol_a = dio.load_tiff(args.spim_a, channel=args.channel_index, series=args.series_index,
-                                inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval)
+                              inverted=args.a_invert, pixel_size=args.pixel_size, step_size=args.interval)
         vol_b = dio.load_tiff(args.spim_b, channel=args.channel_index, series=args.series_index,
-                                inverted=True, pixel_size=args.pixel_size, step_size=args.interval,
-                                flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
+                              inverted=not args.b_not_invert, pixel_size=args.pixel_size, step_size=args.interval,
+                              flipped=(args.b_flipped_x, args.b_flipped_y, args.b_flipped_z))
         volumes = (vol_a, vol_b)
 
     logger.info("Starting data processing...")
@@ -52,7 +57,8 @@ def process(args):
         dio.save_tiff_output(result[1], args.output, f'vol_b_{args.channel_index}_{args.series_index}', args.b_8bit)
         if args.save_rg:
             logger.info('Saving volume A/B...')
-            dio.save_tiff_output_dual(result[0], result[1], args.output, f'vol_ab_{args.channel_index}_{args.series_index}', args.b_8bit)
+            dio.save_tiff_output_dual(result[0], result[1], args.output,
+                                      f'vol_ab_{args.channel_index}_{args.series_index}', args.b_8bit)
     else:
         logger.info('Saving volume...')
         dio.save_tiff_output(result[0], args.output, f'vol_{args.channel_index}_{args.series_index}', args.b_8bit)
@@ -120,7 +126,7 @@ def image_operation(s: str):
 
 
 def extract_psf(args):
-    from dispim import extract_psf
+    from dispim.deconvolution import extract_psf
     extract_psf(args)
 
 
@@ -155,13 +161,13 @@ def main():
     # TODO: Clean this up
     p_process.add_argument('--no-skew', action='store_true', default=False)
     p_process.add_argument('--a-invert', action='store_true', default=False)
+    p_process.add_argument('--b-not-invert', action='store_true', default=False)
     p_process.add_argument('--b-flipped-x', action='store_true', default=False)
     p_process.add_argument('--b-flipped-y', action='store_true', default=False)
     p_process.add_argument('--b-flipped-z', action='store_true', default=False)
     p_process.add_argument('--b-8bit', action='store_true', default=False)
 
     p_process.add_argument('--debug', action='store_true', default=False)
-
 
     p_process.set_defaults(func=process)
 

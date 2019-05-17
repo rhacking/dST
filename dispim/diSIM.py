@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import math
 from typing import Tuple, Union, List
 
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy
@@ -11,6 +11,7 @@ import scipy.stats
 from scipy.stats import norm
 
 import dispim
+import dispim.base
 
 Rotation = Union[Tuple[float, float, float], np.ndarray]
 
@@ -192,11 +193,10 @@ def generate_linear_volume(size: np.ndarray, resolution: np.ndarray, start=0,
 def fwhm_to_sigma(fwhm):
     return fwhm / (2 * math.sqrt(2 * math.log(2)))
 
-from numba import jit
 
 def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: int = 2,
          interval: float = 0.3, plane_size=6, gaussian: bool = True,
-         gaussian_delta: float = 0.078, gaussian_FWHM: float = 1.0) -> dispim.Volume:
+         gaussian_delta: float = 0.078, gaussian_FWHM: float = 1.0) -> dispim.base.Volume:
     v1 = np.array([1, 0, 0])
     v2 = np.array([0, math.sqrt(2) / 2, -math.sqrt(2) / 2]) if right else \
         np.array([0, math.sqrt(2) / 2, math.sqrt(2) / 2])
@@ -241,6 +241,7 @@ def scan(vol: Samplable, right: bool, pixel_size: float = 0.3, pixel_samples: in
     result = np.swapaxes(result, 0, 1)
     result_vol = dispim.Volume(result, right, (pixel_size, pixel_size, interval / np.sqrt(2)))
     return result_vol
+
 
 # from numba import njit
 #
