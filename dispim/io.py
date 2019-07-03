@@ -93,10 +93,10 @@ def save_tiff_chunks(vol: Volume, path: str, size: int, stride: int, b_8bit: boo
 
 def load_tiff(path: str, series: int = 0, channel: int = 0, inverted: bool = False,
               flipped: Tuple[bool] = (False, False, False), pixel_size: float = None,
-              step_size: float = None) -> Union[Tuple[Volume, Volume], Tuple[Volume]]:
+              step_size: float = None, is_ome=True) -> Union[Tuple[Volume, Volume], Tuple[Volume]]:
     import json
 
-    with tifffile.TiffFile(path) as f:
+    with tifffile.TiffFile(path, is_ome=is_ome) as f:
         data = f.asarray(series=series)
         logger.debug(f'Data shape is {data.shape}')
         # TODO: Figure out how to properly handle the axis order
